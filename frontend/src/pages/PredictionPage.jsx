@@ -59,6 +59,8 @@ function PredictionPage({ onOpenHistory }) {
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [isOpeningCamera, setIsOpeningCamera] = useState(false);
 
+  const [zoom, setZoom] = useState(1);
+
   const resultClass = useMemo(() => {
     const value =
       result?.predicted_class ||
@@ -205,6 +207,7 @@ function PredictionPage({ onOpenHistory }) {
     setSource("camera");
     setResult(null);
     setError("");
+    setZoom(1);
 
     stopCamera();
   };
@@ -237,6 +240,7 @@ function PredictionPage({ onOpenHistory }) {
     setSource("gallery");
     setResult(null);
     setError("");
+    setZoom(1);
   };
 
   const resetImage = () => {
@@ -250,10 +254,27 @@ function PredictionPage({ onOpenHistory }) {
     setPreview("");
     setResult(null);
     setError("");
+    setZoom(1);
 
     if (galleryRef.current) {
       galleryRef.current.value = "";
     }
+  };
+
+  const zoomIn = () => {
+    setZoom((currentZoom) =>
+      Math.min(Number((currentZoom + 0.25).toFixed(2)), 3),
+    );
+  };
+
+  const zoomOut = () => {
+    setZoom((currentZoom) =>
+      Math.max(Number((currentZoom - 0.25).toFixed(2)), 0.5),
+    );
+  };
+
+  const resetZoom = () => {
+    setZoom(1);
   };
 
   const runPrediction = async () => {
@@ -388,11 +409,58 @@ function PredictionPage({ onOpenHistory }) {
             <div className={`prediction-preview ${preview ? "filled" : ""}`}>
               {preview ? (
                 <>
-                  <img src={preview} alt="Pratinjau buah kelapa sawit" />
+                  <div className="prediction-preview-viewport">
+                    <img
+                      src={preview}
+                      alt="Pratinjau buah kelapa sawit"
+                      style={{
+                        transform: `scale(${zoom})`,
+                      }}
+                    />
+                  </div>
 
-                  <button type="button" onClick={resetImage}>
-                    Ganti gambar
-                  </button>
+                  <div className="prediction-preview-toolbar">
+                    <div className="prediction-zoom-controls">
+                      <button
+                        type="button"
+                        onClick={zoomOut}
+                        disabled={zoom <= 0.5}
+                        aria-label="Perkecil gambar"
+                        title="Zoom out"
+                      >
+                        −
+                      </button>
+
+                      <span>{Math.round(zoom * 100)}%</span>
+
+                      <button
+                        type="button"
+                        onClick={zoomIn}
+                        disabled={zoom >= 3}
+                        aria-label="Perbesar gambar"
+                        title="Zoom in"
+                      >
+                        +
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={resetZoom}
+                        disabled={zoom === 1}
+                        className="prediction-zoom-reset"
+                      >
+                        Reset
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="prediction-change-image"
+                      onClick={resetImage}
+                    >
+                      Ganti gambar
+                    </button>
+                  </div>
                 </>
               ) : (
                 <div>
