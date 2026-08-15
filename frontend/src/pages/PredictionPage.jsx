@@ -1,29 +1,46 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { predictPalmImage } from "../services/api";
 
+const MAX_ZOOM = 5;
+const MIN_ZOOM = 1;
+const ZOOM_STEP = 0.2;
+
 const CLASS_INFO = {
   belum_masak: {
     label: "Belum Masak",
     icon: "🟢",
+    status: "Belum siap dipanen",
     description:
       "Buah belum mencapai tingkat kematangan optimal untuk dipanen.",
+    recommendation:
+      "Lakukan pemeriksaan kembali setelah buah menunjukkan perubahan warna dan ciri kematangan yang lebih jelas.",
   },
   masak: {
     label: "Masak",
     icon: "🟠",
+    status: "Siap dipanen",
     description:
       "Buah berada pada tingkat kematangan yang sesuai untuk dipanen.",
+    recommendation:
+      "Buah dapat diprioritaskan untuk proses panen sesuai kondisi lapangan.",
   },
   terlalu_masak: {
     label: "Terlalu Masak",
     icon: "🔴",
+    status: "Melewati kematangan optimal",
     description: "Buah telah melewati tingkat kematangan optimal.",
+    recommendation:
+      "Buah sebaiknya segera ditangani agar keterlambatan panen tidak semakin bertambah.",
   },
 };
 
 function toPercent(value) {
   const number = Number(value || 0);
   return number <= 1 ? number * 100 : number;
+}
+
+function normalizeClassName(value = "") {
+  return String(value).trim().toLowerCase().replace(/\s+/g, "_");
 }
 
 function dataUrlToFile(dataUrl, filename) {
@@ -48,18 +65,19 @@ function PredictionPage({ onOpenHistory }) {
   const canvasRef = useRef(null);
   const cameraStreamRef = useRef(null);
 
+  const [mode, setMode] = useState("camera");
+  const [cameraActive, setCameraActive] = useState(false);
+  const [isOpeningCamera, setIsOpeningCamera] = useState(false);
+
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
-  const [source, setSource] = useState("gallery");
+  const [source, setSource] = useState("camera");
+
+  const [zoom, setZoom] = useState(1);
 
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
-  const [isCameraOpen, setIsCameraOpen] = useState(false);
-  const [isOpeningCamera, setIsOpeningCamera] = useState(false);
-
-  const [zoom, setZoom] = useState(1);
 
   const resultClass = useMemo(() => {
     const value =
@@ -68,7 +86,7 @@ function PredictionPage({ onOpenHistory }) {
       result?.result?.predicted_class ||
       "";
 
-    return String(value).trim().toLowerCase().replace(/\s+/g, "_");
+    return normalizeClassName(value);
   }, [result]);
 
   const confidence = toPercent(
@@ -83,13 +101,15 @@ function PredictionPage({ onOpenHistory }) {
   const info = CLASS_INFO[resultClass] || {
     label: resultClass || "Hasil Prediksi",
     icon: "🌴",
+    status: "Hasil klasifikasi",
     description: "Hasil klasifikasi berhasil diperoleh dari sistem.",
+    recommendation:
+      "Gunakan hasil klasifikasi sebagai informasi pendukung pemeriksaan.",
   };
 
   const stopCamera = () => {
     if (cameraStreamRef.current) {
       cameraStreamRef.current.getTracks().forEach((track) => track.stop());
-
       cameraStreamRef.current = null;
     }
 
@@ -97,28 +117,71 @@ function PredictionPage({ onOpenHistory }) {
       videoRef.current.srcObject = null;
     }
 
-    setIsCameraOpen(false);
+    setCameraActive(false);
     setIsOpeningCamera(false);
+  };
+
+  const clearPreviewUrl = () => {
+    if (preview?.startsWith("blob:")) {
+      URL.revokeObjectURL(preview);
+    }
   };
 
   useEffect(() => {
     return () => {
-      stopCamera();
-
-      if (preview) {
-        URL.revokeObjectURL(preview);
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
   }, []);
+
+  const resetZoom = () => {
+    setZoom(1);
+  };
+
+  const zoomIn = () => {
+    setZoom((previous) =>
+      Math.min(Number((previous + ZOOM_STEP).toFixed(1)), MAX_ZOOM),
+    );
+  };
+
+  const zoomOut = () => {
+    setZoom((previous) =>
+      Math.max(Number((previous - ZOOM_STEP).toFixed(1)), MIN_ZOOM),
+    );
+  };
+
+  const switchMode = (selectedMode) => {
+    stopCamera();
+    clearPreviewUrl();
+
+    setMode(selectedMode);
+    setFile(null);
+    setPreview("");
+    setSource(selectedMode);
+    setResult(null);
+    setError("");
+    setLoading(false);
+    resetZoom();
+
+    if (galleryRef.current) {
+      galleryRef.current.value = "";
+    }
+  };
 
   const openCamera = async () => {
     setError("");
     setResult(null);
     setIsOpeningCamera(true);
+    clearPreviewUrl();
+    setFile(null);
+    setPreview("");
+    setSource("camera");
+    resetZoom();
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setError(
-        "Browser ini belum mendukung kamera langsung. Gunakan tombol Pilih Galeri.",
+        "Browser ini belum mendukung kamera langsung. Gunakan mode Galeri.",
       );
       setIsOpeningCamera(false);
       return;
@@ -143,7 +206,7 @@ function PredictionPage({ onOpenHistory }) {
       });
 
       cameraStreamRef.current = stream;
-      setIsCameraOpen(true);
+      setCameraActive(true);
       setIsOpeningCamera(false);
 
       window.requestAnimationFrame(() => {
@@ -153,8 +216,8 @@ function PredictionPage({ onOpenHistory }) {
         }
       });
     } catch (cameraError) {
+      setCameraActive(false);
       setIsOpeningCamera(false);
-      setIsCameraOpen(false);
 
       const message =
         cameraError?.name === "NotAllowedError"
@@ -174,16 +237,16 @@ function PredictionPage({ onOpenHistory }) {
       return;
     }
 
-    const width = video.videoWidth;
-    const height = video.videoHeight;
+    const videoWidth = video.videoWidth;
+    const videoHeight = video.videoHeight;
 
-    if (!width || !height) {
-      setError("Kamera masih memuat. Tunggu sebentar lalu tekan Ambil Foto.");
+    if (!videoWidth || !videoHeight) {
+      setError("Kamera masih memuat. Tunggu sebentar lalu coba lagi.");
       return;
     }
 
-    canvas.width = width;
-    canvas.height = height;
+    canvas.width = videoWidth;
+    canvas.height = videoHeight;
 
     const context = canvas.getContext("2d");
 
@@ -192,24 +255,54 @@ function PredictionPage({ onOpenHistory }) {
       return;
     }
 
-    context.drawImage(video, 0, 0, width, height);
+    /*
+      Zoom mengikuti perilaku V2:
+      video diperbesar secara visual dan hasil capture juga dicrop
+      ke bagian tengah sesuai nilai zoom.
+    */
+    const cropWidth = videoWidth / zoom;
+    const cropHeight = videoHeight / zoom;
+    const cropX = (videoWidth - cropWidth) / 2;
+    const cropY = (videoHeight - cropHeight) / 2;
 
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+    context.drawImage(
+      video,
+      cropX,
+      cropY,
+      cropWidth,
+      cropHeight,
+      0,
+      0,
+      videoWidth,
+      videoHeight,
+    );
 
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
     const capturedFile = dataUrlToFile(dataUrl, `foto-sawit-${Date.now()}.jpg`);
 
-    if (preview) {
-      URL.revokeObjectURL(preview);
-    }
+    clearPreviewUrl();
 
     setFile(capturedFile);
     setPreview(URL.createObjectURL(capturedFile));
     setSource("camera");
     setResult(null);
     setError("");
-    setZoom(1);
 
     stopCamera();
+  };
+
+  const retakePhoto = async () => {
+    clearPreviewUrl();
+
+    setFile(null);
+    setPreview("");
+    setResult(null);
+    setError("");
+    resetZoom();
+
+    if (mode === "camera") {
+      await openCamera();
+    }
   };
 
   const chooseFile = (event) => {
@@ -221,60 +314,45 @@ function PredictionPage({ onOpenHistory }) {
 
     if (!selected.type.startsWith("image/")) {
       setError("File yang dipilih harus berupa gambar.");
+      event.target.value = "";
       return;
     }
 
     if (selected.size > 10 * 1024 * 1024) {
       setError("Ukuran gambar maksimal 10 MB.");
+      event.target.value = "";
       return;
     }
 
     stopCamera();
-
-    if (preview) {
-      URL.revokeObjectURL(preview);
-    }
+    clearPreviewUrl();
 
     setFile(selected);
     setPreview(URL.createObjectURL(selected));
     setSource("gallery");
     setResult(null);
     setError("");
-    setZoom(1);
+    resetZoom();
   };
 
-  const resetImage = () => {
-    stopCamera();
+  const openGallery = () => {
+    galleryRef.current?.click();
+  };
 
-    if (preview) {
-      URL.revokeObjectURL(preview);
-    }
+  const resetInput = () => {
+    stopCamera();
+    clearPreviewUrl();
 
     setFile(null);
     setPreview("");
     setResult(null);
     setError("");
-    setZoom(1);
+    setLoading(false);
+    resetZoom();
 
     if (galleryRef.current) {
       galleryRef.current.value = "";
     }
-  };
-
-  const zoomIn = () => {
-    setZoom((currentZoom) =>
-      Math.min(Number((currentZoom + 0.25).toFixed(2)), 3),
-    );
-  };
-
-  const zoomOut = () => {
-    setZoom((currentZoom) =>
-      Math.max(Number((currentZoom - 0.25).toFixed(2)), 0.5),
-    );
-  };
-
-  const resetZoom = () => {
-    setZoom(1);
   };
 
   const runPrediction = async () => {
@@ -289,7 +367,6 @@ function PredictionPage({ onOpenHistory }) {
 
     try {
       const response = await predictPalmImage(file, source);
-
       setResult(response);
     } catch (requestError) {
       setError(
@@ -301,290 +378,335 @@ function PredictionPage({ onOpenHistory }) {
   };
 
   return (
-    <main className="prediction-page">
-      <section className="prediction-hero">
+    <main className="prediction-v2-page">
+      <section className="prediction-v2-hero">
+        <div className="prediction-v2-brand">
+          <span className="prediction-v2-brand-icon">🌴</span>
+
+          <div>
+            <p className="prediction-v2-eyebrow">Pemeriksa Kematangan Sawit</p>
+            <h1>Cek Kematangan Sawit</h1>
+          </div>
+        </div>
+
+        <p className="prediction-v2-subtitle">
+          Ambil foto atau pilih gambar untuk memeriksa tingkat kematangan buah
+          kelapa sawit.
+        </p>
+      </section>
+
+      <section className="prediction-v2-mode-switch">
+        <button
+          type="button"
+          className={mode === "camera" ? "active" : ""}
+          onClick={() => switchMode("camera")}
+          disabled={loading}
+        >
+          Kamera
+        </button>
+
+        <button
+          type="button"
+          className={mode === "gallery" ? "active" : ""}
+          onClick={() => switchMode("gallery")}
+          disabled={loading}
+        >
+          Galeri
+        </button>
+      </section>
+
+      <section className="prediction-v2-tips-card">
+        <div className="prediction-v2-tips-icon">💡</div>
+
         <div>
-          <span>Klasifikasi AI</span>
-          <h1>Periksa kematangan buah sawit</h1>
+          <b>Tips foto terbaik</b>
           <p>
-            Ambil foto atau pilih gambar. Ikuti petunjuk agar hasil lebih mudah
-            dipahami.
+            Pastikan buah terlihat jelas, cahaya cukup, dan objek berada di
+            tengah kotak panduan.
           </p>
         </div>
-
-        <div className="prediction-hero-icon">📷</div>
       </section>
 
-      <section className="prediction-guide">
-        <header>
-          <span>Petunjuk penggunaan</span>
-          <h2>Cukup tiga langkah</h2>
-        </header>
+      <section className="prediction-v2-camera-card">
+        <div className="prediction-v2-camera-frame">
+          {!preview ? (
+            mode === "camera" ? (
+              <>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="prediction-v2-camera-media"
+                  style={{
+                    transform: `scale(${zoom})`,
+                  }}
+                />
 
-        <div className="prediction-steps">
-          <article>
-            <b>1</b>
-            <div>
-              <h3>Foto buah sawit</h3>
-              <p>Pastikan buah terlihat besar, jelas, dan tidak buram.</p>
-            </div>
-          </article>
+                {!cameraActive && (
+                  <div className="prediction-v2-camera-placeholder">
+                    <span>📷</span>
+                    <p>
+                      {isOpeningCamera
+                        ? "Membuka kamera..."
+                        : "Kamera belum aktif"}
+                    </p>
+                  </div>
+                )}
 
-          <article>
-            <b>2</b>
-            <div>
-              <h3>Periksa pencahayaan</h3>
-              <p>Gunakan tempat terang dan hindari bayangan berlebihan.</p>
-            </div>
-          </article>
+                <div className="prediction-v2-camera-guide" />
 
-          <article>
-            <b>3</b>
-            <div>
-              <h3>Tekan klasifikasi</h3>
-              <p>Tunggu sampai hasil tingkat kematangan muncul.</p>
-            </div>
-          </article>
+                <div className="prediction-v2-zoom-badge">
+                  {zoom.toFixed(1)}x
+                </div>
+              </>
+            ) : (
+              <div className="prediction-v2-gallery-placeholder">
+                <span>🖼️</span>
+                <p>Belum ada foto dipilih</p>
+              </div>
+            )
+          ) : (
+            <img
+              src={preview}
+              alt="Hasil input buah kelapa sawit"
+              className="prediction-v2-camera-media"
+            />
+          )}
         </div>
-      </section>
 
-      <section className="prediction-layout">
-        <div className="prediction-card">
-          <header>
-            <span>Masukkan gambar</span>
-            <h2>Pilih cara mengambil foto</h2>
-          </header>
-
-          <div className="prediction-source-buttons">
+        {mode === "camera" && !preview && (
+          <div className="prediction-v2-zoom-panel">
             <button
               type="button"
-              onClick={openCamera}
-              disabled={loading || isOpeningCamera}
+              onClick={zoomOut}
+              disabled={!cameraActive || zoom <= MIN_ZOOM}
+              aria-label="Zoom out"
             >
-              <i>📸</i>
-              <strong>
-                {isOpeningCamera ? "Membuka kamera..." : "Buka Kamera"}
-              </strong>
-              <small>Mengutamakan kamera belakang</small>
+              −
+            </button>
+
+            <div className="prediction-v2-zoom-info">
+              <span>Zoom</span>
+              <b>{zoom.toFixed(1)}x</b>
+            </div>
+
+            <button
+              type="button"
+              onClick={zoomIn}
+              disabled={!cameraActive || zoom >= MAX_ZOOM}
+              aria-label="Zoom in"
+            >
+              +
             </button>
 
             <button
               type="button"
-              onClick={() => galleryRef.current?.click()}
-              disabled={loading}
+              className="prediction-v2-reset-zoom"
+              onClick={resetZoom}
+              disabled={!cameraActive || zoom === 1}
             >
-              <i>🖼️</i>
-              <strong>Pilih Galeri</strong>
-              <small>Gunakan gambar yang sudah ada</small>
+              Reset
             </button>
           </div>
+        )}
 
-          <input
-            ref={galleryRef}
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={chooseFile}
-          />
+        {mode === "camera" ? (
+          <div className="prediction-v2-button-grid">
+            {preview ? (
+              <button
+                type="button"
+                className="prediction-v2-secondary-btn"
+                onClick={retakePhoto}
+                disabled={loading}
+              >
+                Foto Ulang
+              </button>
+            ) : !cameraActive ? (
+              <button
+                type="button"
+                className="prediction-v2-secondary-btn"
+                onClick={openCamera}
+                disabled={loading || isOpeningCamera}
+              >
+                {isOpeningCamera ? "Membuka..." : "Buka Kamera"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="prediction-v2-danger-btn"
+                onClick={stopCamera}
+                disabled={loading}
+              >
+                Tutup Kamera
+              </button>
+            )}
 
-          {isCameraOpen && (
-            <section className="prediction-camera-panel">
-              <video ref={videoRef} autoPlay playsInline muted />
+            {!preview ? (
+              <button
+                type="button"
+                className="prediction-v2-primary-btn"
+                onClick={capturePhoto}
+                disabled={!cameraActive || loading}
+              >
+                Ambil Gambar
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="prediction-v2-primary-btn"
+                onClick={runPrediction}
+                disabled={loading}
+              >
+                {loading ? "Menganalisis..." : "Prediksi"}
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="prediction-v2-button-grid">
+            <button
+              type="button"
+              className="prediction-v2-secondary-btn"
+              onClick={resetInput}
+              disabled={loading}
+            >
+              Reset
+            </button>
 
-              <canvas ref={canvasRef} hidden />
+            <button
+              type="button"
+              className="prediction-v2-primary-btn"
+              onClick={openGallery}
+              disabled={loading}
+            >
+              {preview ? "Ganti Foto" : "Pilih Foto"}
+            </button>
+          </div>
+        )}
 
-              <div className="prediction-camera-actions">
-                <button type="button" onClick={stopCamera}>
-                  Tutup kamera
-                </button>
-
-                <button type="button" onClick={capturePhoto}>
-                  📸 Ambil Foto
-                </button>
-              </div>
-            </section>
-          )}
-
-          {!isCameraOpen && (
-            <div className={`prediction-preview ${preview ? "filled" : ""}`}>
-              {preview ? (
-                <>
-                  <div className="prediction-preview-viewport">
-                    <img
-                      src={preview}
-                      alt="Pratinjau buah kelapa sawit"
-                      style={{
-                        transform: `scale(${zoom})`,
-                      }}
-                    />
-                  </div>
-
-                  <div className="prediction-preview-toolbar">
-                    <div className="prediction-zoom-controls">
-                      <button
-                        type="button"
-                        onClick={zoomOut}
-                        disabled={zoom <= 0.5}
-                        aria-label="Perkecil gambar"
-                        title="Zoom out"
-                      >
-                        −
-                      </button>
-
-                      <span>{Math.round(zoom * 100)}%</span>
-
-                      <button
-                        type="button"
-                        onClick={zoomIn}
-                        disabled={zoom >= 3}
-                        aria-label="Perbesar gambar"
-                        title="Zoom in"
-                      >
-                        +
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={resetZoom}
-                        disabled={zoom === 1}
-                        className="prediction-zoom-reset"
-                      >
-                        Reset
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      className="prediction-change-image"
-                      onClick={resetImage}
-                    >
-                      Ganti gambar
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div>
-                  <span>🌴</span>
-                  <strong>Belum ada gambar</strong>
-                  <p>Tekan tombol kamera atau galeri di atas.</p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {file && !isCameraOpen && (
-            <div className="prediction-file-info">
-              <span>{file.name}</span>
-              <strong>{(file.size / 1024 / 1024).toFixed(2)} MB</strong>
-            </div>
-          )}
-
-          {error && <div className="prediction-error">⚠️ {error}</div>}
-
+        {mode === "camera" && preview && (
           <button
             type="button"
-            className="prediction-submit"
-            onClick={runPrediction}
-            disabled={!file || loading || isCameraOpen}
+            className="prediction-v2-secondary-btn prediction-v2-full"
+            onClick={resetInput}
+            disabled={loading}
           >
-            {loading ? "Sedang menganalisis..." : "✨ Klasifikasikan Sekarang"}
+            Reset
           </button>
+        )}
 
-          {result && (
-            <section className="prediction-result">
-              <header>
-                <div>
-                  <span>Hasil klasifikasi</span>
-                  <h2>Analisis selesai</h2>
-                </div>
+        {mode === "gallery" && preview && (
+          <button
+            type="button"
+            className="prediction-v2-primary-btn prediction-v2-full"
+            onClick={runPrediction}
+            disabled={loading}
+          >
+            {loading ? "Menganalisis..." : "Prediksi Sekarang"}
+          </button>
+        )}
 
-                <b>✓</b>
-              </header>
+        <input
+          ref={galleryRef}
+          type="file"
+          accept="image/*"
+          onChange={chooseFile}
+          hidden
+        />
 
-              <div className="prediction-result-main">
-                <article>
-                  <i>{info.icon}</i>
+        <canvas ref={canvasRef} hidden />
 
-                  <div>
-                    <small>Tingkat kematangan</small>
-                    <h3>{info.label}</h3>
-                    <p>{info.description}</p>
-                  </div>
-                </article>
+        {file && (
+          <div className="prediction-v2-file-info">
+            <span>{file.name}</span>
+            <b>{(file.size / 1024 / 1024).toFixed(2)} MB</b>
+          </div>
+        )}
 
-                <article className="prediction-confidence">
-                  <small>Keyakinan AI</small>
-                  <strong>{confidence.toFixed(2)}%</strong>
+        {error && <div className="prediction-v2-error">⚠️ {error}</div>}
+      </section>
 
-                  <div>
-                    <span
-                      style={{
-                        width: `${Math.min(Math.max(confidence, 0), 100)}%`,
-                      }}
-                    />
-                  </div>
-                </article>
-              </div>
+      {loading && (
+        <section className="prediction-v2-loading-card">
+          <div className="prediction-v2-spinner" />
+          <h2>Menganalisis Citra</h2>
+          <p>Sistem sedang memeriksa tingkat kematangan buah kelapa sawit.</p>
+        </section>
+      )}
 
-              <div className="prediction-probabilities">
-                {Object.entries(CLASS_INFO).map(([key, classInfo]) => (
-                  <article key={key}>
+      {result && (
+        <section
+          className={`prediction-v2-result-card prediction-v2-result-${resultClass}`}
+        >
+          <div className="prediction-v2-result-top">
+            <div className="prediction-v2-result-icon">{info.icon}</div>
+
+            <div>
+              <p className="prediction-v2-result-label">Hasil Prediksi</p>
+              <h2>{info.label}</h2>
+            </div>
+          </div>
+
+          <div className="prediction-v2-status-pill">{info.status}</div>
+
+          <div className="prediction-v2-confidence-box">
+            <span>Confidence</span>
+            <b>{confidence.toFixed(2)}%</b>
+            <small>Tingkat keyakinan model terhadap hasil klasifikasi.</small>
+          </div>
+
+          <div className="prediction-v2-scan-meta">
+            <span>📅 {new Date().toLocaleDateString("id-ID")}</span>
+            <span>📷 {source === "camera" ? "Kamera" : "Galeri"}</span>
+          </div>
+
+          <div className="prediction-v2-recommendation-box">
+            <b>Keterangan</b>
+            <p>{info.description}</p>
+          </div>
+
+          <div className="prediction-v2-recommendation-box">
+            <b>Saran</b>
+            <p>{info.recommendation}</p>
+          </div>
+
+          <div className="prediction-v2-prob-list">
+            {Object.entries(CLASS_INFO).map(([key, classInfo]) => {
+              const percent = toPercent(probabilities[key]);
+
+              return (
+                <div className="prediction-v2-prob-bar-item" key={key}>
+                  <div className="prediction-v2-prob-bar-top">
                     <span>
                       {classInfo.icon} {classInfo.label}
                     </span>
+                    <b>{percent.toFixed(2)}%</b>
+                  </div>
 
-                    <strong>{toPercent(probabilities[key]).toFixed(2)}%</strong>
-                  </article>
-                ))}
-              </div>
-
-              <div className="prediction-actions">
-                <button type="button" onClick={resetImage}>
-                  Periksa gambar lain
-                </button>
-
-                <button type="button" onClick={onOpenHistory}>
-                  Lihat riwayat
-                </button>
-              </div>
-            </section>
-          )}
-        </div>
-
-        <aside className="prediction-tips">
-          <article>
-            <span>☀️</span>
-            <div>
-              <h3>Cahaya cukup</h3>
-              <p>Foto di tempat terang, tetapi jangan terlalu silau.</p>
-            </div>
-          </article>
-
-          <article>
-            <span>🎯</span>
-            <div>
-              <h3>Fokus pada buah</h3>
-              <p>Usahakan buah memenuhi sebagian besar gambar.</p>
-            </div>
-          </article>
-
-          <article>
-            <span>🧼</span>
-            <div>
-              <h3>Bersihkan kamera</h3>
-              <p>Lensa yang kotor dapat membuat foto terlihat berkabut.</p>
-            </div>
-          </article>
-
-          <div className="prediction-warning">
-            <strong>Perhatian</strong>
-            <p>
-              Gunakan gambar buah kelapa sawit. Gambar benda lain dapat
-              menghasilkan klasifikasi yang tidak sesuai.
-            </p>
+                  <div className="prediction-v2-prob-track">
+                    <div
+                      className="prediction-v2-prob-fill"
+                      style={{
+                        width: `${Math.min(Math.max(percent, 0), 100)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </aside>
-      </section>
+
+          <div className="prediction-v2-result-actions">
+            <button type="button" onClick={resetInput}>
+              Periksa gambar lain
+            </button>
+
+            <button type="button" onClick={onOpenHistory}>
+              Lihat riwayat
+            </button>
+          </div>
+        </section>
+      )}
     </main>
   );
 }
