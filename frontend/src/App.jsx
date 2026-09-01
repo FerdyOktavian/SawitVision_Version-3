@@ -6,6 +6,7 @@ import BottomNav from "./components/BottomNav";
 import HomePage from "./pages/HomePage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
+import ForgotAccountPage from "./pages/ForgotAccountPage";
 import PredictionPage from "./pages/PredictionPage";
 import HistoryPage from "./pages/HistoryPage";
 import ProfilePage from "./pages/ProfilePage";
@@ -50,7 +51,15 @@ function getInitialActivePage() {
 }
 
 function App() {
+  // =====================================================
+  // AUTH PAGE
+  // login | register | forgot-account
+  // =====================================================
   const [authPage, setAuthPage] = useState("login");
+
+  // Data akun yang ditemukan dari fitur lupa akun.
+  // Nantinya bisa digunakan untuk mengisi form login otomatis.
+  const [recoveredAccount, setRecoveredAccount] = useState(null);
 
   const [activePage, setActivePage] = useState(() => getInitialActivePage());
 
@@ -143,6 +152,8 @@ function App() {
   const handleLoginSuccess = (user) => {
     setCurrentUser(user);
 
+    setRecoveredAccount(null);
+
     setActivePage("home");
 
     localStorage.setItem(ACTIVE_PAGE_KEY, "home");
@@ -152,6 +163,31 @@ function App() {
   // REGISTER
   // =====================================================
   const handleRegisterSuccess = () => {
+    setRecoveredAccount(null);
+
+    setAuthPage("login");
+  };
+
+  // =====================================================
+  // LUPA AKUN
+  // =====================================================
+
+  // Dibuka dari LoginPage
+  const handleGoToForgotAccount = () => {
+    setRecoveredAccount(null);
+
+    setAuthPage("forgot-account");
+  };
+
+  // Ketika akun berhasil ditemukan berdasarkan nomor telepon.
+  const handleAccountRecovered = (account) => {
+    setRecoveredAccount(account);
+
+    setAuthPage("login");
+  };
+
+  // Kembali dari halaman lupa akun ke login.
+  const handleBackToLogin = () => {
     setAuthPage("login");
   };
 
@@ -166,6 +202,7 @@ function App() {
     setCurrentUser(null);
     setActivePage("home");
     setAuthPage("login");
+    setRecoveredAccount(null);
   };
 
   // =====================================================
@@ -253,19 +290,45 @@ function App() {
   // BELUM LOGIN
   // =====================================================
   if (!currentUser) {
+    // ===================================================
+    // REGISTER
+    // ===================================================
     if (authPage === "register") {
       return (
         <RegisterPage
-          onGoToLogin={() => setAuthPage("login")}
+          onGoToLogin={() => {
+            setRecoveredAccount(null);
+            setAuthPage("login");
+          }}
           onRegisterSuccess={handleRegisterSuccess}
         />
       );
     }
 
+    // ===================================================
+    // LUPA AKUN
+    // ===================================================
+    if (authPage === "forgot-account") {
+      return (
+        <ForgotAccountPage
+          onGoToLogin={handleBackToLogin}
+          onAccountRecovered={handleAccountRecovered}
+        />
+      );
+    }
+
+    // ===================================================
+    // LOGIN
+    // ===================================================
     return (
       <LoginPage
         onLoginSuccess={handleLoginSuccess}
-        onGoToRegister={() => setAuthPage("register")}
+        onGoToRegister={() => {
+          setRecoveredAccount(null);
+          setAuthPage("register");
+        }}
+        onGoToForgotAccount={handleGoToForgotAccount}
+        recoveredAccount={recoveredAccount}
       />
     );
   }

@@ -611,3 +611,33 @@ def delete_my_account(
             ),
         ) from exc
 
+class FindAccountRequest(BaseModel):
+    phone: str = Field(..., min_length=8, max_length=20)
+@router.post("/find-account")
+def find_account(
+    payload: FindAccountRequest,
+    db: Session = Depends(get_db),
+):
+    phone = payload.phone.strip()
+
+    row = db.execute(
+        text("""
+            SELECT id, full_name, phone_number
+            FROM users
+            WHERE phone_number = :phone
+            LIMIT 1
+        """),
+        {"phone": phone},
+    ).fetchone()
+
+    if not row:
+        return {
+            "found": False,
+            "message": "Nomor telepon belum terdaftar.",
+        }
+
+    return {
+        "found": True,
+        "name": row[1],
+        "phone": row[2],
+    }

@@ -5482,3 +5482,84 @@ input[type="date"]::-webkit-calendar-picker-indicator {
     max-width: 230px;
   }
 }
+
+.forgot-account-link {
+  width: 100%;
+  margin-top: 12px;
+  border: none;
+  background: transparent;
+  color: #2f7d32;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.forgot-account-link:hover {
+  text-decoration: underline;
+}
+
+.forgot-account-card {
+  width: 100%;
+}
+
+.forgot-account-icon {
+  font-size: 42px;
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+.forgot-account-card h2 {
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.forgot-account-description {
+  margin-bottom: 22px;
+  color: #6b6257;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.account-found-card {
+  margin-top: 18px;
+  padding: 20px;
+  border: 1px solid #d8e7d4;
+  border-radius: 16px;
+  background: #f5faf3;
+  text-align: center;
+}
+
+.account-found-icon {
+  margin-bottom: 8px;
+  font-size: 34px;
+}
+
+.account-found-label {
+  margin-bottom: 6px;
+  color: #62705f;
+  font-size: 14px;
+}
+
+.account-found-card h3 {
+  margin: 0 0 6px;
+  color: #24351f;
+}
+
+.account-found-phone {
+  margin-bottom: 18px;
+  color: #6b6257;
+}
+
+.back-login-button {
+  width: 100%;
+  margin-top: 14px;
+  padding: 10px;
+  border: none;
+  background: transparent;
+  color: #6b6257;
+  cursor: pointer;
+}
+
+.back-login-button:hover {
+  color: #2f7d32;
+}
