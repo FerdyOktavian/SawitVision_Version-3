@@ -144,7 +144,7 @@ function ForgotAccountPage({ onGoToLogin, onAccountRecovered }) {
                   disabled={isLoading}
                 />
 
-                <small>Bisa ditulis dengan format 08 atau +62.</small>
+                <small>Bisa ditulis dengan format 08.</small>
               </div>
 
               {errorMessage && (
