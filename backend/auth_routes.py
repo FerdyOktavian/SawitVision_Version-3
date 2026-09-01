@@ -91,25 +91,20 @@ class UpdateProfileRequest(BaseModel):
 # =========================================================
 def normalize_phone_number(phone_number: str) -> str:
     """
-    Menyamakan format nomor telepon sebelum disimpan atau dicari.
+    Menyamakan format nomor telepon.
 
-    Contoh:
-    +62 812-3456-7890 -> 081234567890
-    6281234567890     -> 081234567890
-    0812 3456 7890   -> 081234567890
+    Format yang digunakan SawitVision:
+    08xxxxxxxxxx
     """
     digits = re.sub(r"\D", "", phone_number or "")
 
-    if digits.startswith("62"):
-        digits = "0" + digits[2:]
-    elif digits.startswith("8"):
-        digits = "0" + digits
+    if not digits.startswith("08"):
+        raise ValueError("Nomor telepon harus diawali 08.")
 
-    if not digits.startswith("0"):
-        raise ValueError("Nomor telepon harus diawali 0 atau +62.")
-
-    if len(digits) < 9 or len(digits) > 15:
-        raise ValueError("Nomor telepon harus terdiri dari 9 sampai 15 digit.")
+    if len(digits) < 10 or len(digits) > 15:
+        raise ValueError(
+            "Nomor telepon harus terdiri dari 10 sampai 15 digit."
+        )
 
     return digits
 

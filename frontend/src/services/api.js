@@ -138,7 +138,18 @@ export async function loginUser(payload) {
     body: JSON.stringify(payload),
   });
 }
+// =========================================================
+// LUPA AKUN / CARI AKUN
+// =========================================================
 
+export async function findAccountByPhone(phoneNumber) {
+  return apiRequest("/auth/find-account", {
+    method: "POST",
+    body: JSON.stringify({
+      phone: phoneNumber,
+    }),
+  });
+}
 // =========================================================
 // USER / PROFILE
 // =========================================================

@@ -2,15 +2,25 @@ import { useState } from "react";
 import { loginUser, saveAuthSession } from "../services/api";
 import { formatPhoneInput, getPhoneError } from "../utils/phone";
 
-function LoginPage({ onLoginSuccess, onGoToRegister }) {
-  const [formData, setFormData] = useState({
-    name: "",
-    phone_number: "",
-  });
+function LoginPage({
+  onLoginSuccess,
+  onGoToRegister,
+  onGoToForgotAccount,
+  recoveredAccount,
+}) {
+  const [formData, setFormData] = useState(() => ({
+    name: recoveredAccount?.name || "",
+    phone_number: formatPhoneInput(recoveredAccount?.phone || ""),
+  }));
 
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
+  
+
+  // =====================================================
+  // HANDLE INPUT
+  // =====================================================
   const handleChange = (event) => {
     const { name, value } = event.target;
 
@@ -22,6 +32,9 @@ function LoginPage({ onLoginSuccess, onGoToRegister }) {
     }));
   };
 
+  // =====================================================
+  // LOGIN
+  // =====================================================
   const handleSubmit = async (event) => {
     event.preventDefault();
 
@@ -116,7 +129,21 @@ function LoginPage({ onLoginSuccess, onGoToRegister }) {
                 disabled={isLoading}
               />
 
-              <small>Bisa ditulis dengan format 08 atau +62.</small>
+              <small>Bisa ditulis dengan format 08.</small>
+            </div>
+
+            {/* ============================================
+                TOMBOL LUPA AKUN
+            ============================================ */}
+            <div className="auth-forgot-account">
+              <button
+                type="button"
+                className="auth-link-button"
+                onClick={onGoToForgotAccount}
+                disabled={isLoading}
+              >
+                Lupa akun?
+              </button>
             </div>
 
             {errorMessage && (

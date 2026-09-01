@@ -3,27 +3,17 @@ export function normalizePhoneNumber(value) {
     return "";
   }
 
-  let digits = String(value).replace(/\D/g, "");
-
-  if (digits.startsWith("62")) {
-    digits = `0${digits.slice(2)}`;
-  } else if (digits.startsWith("8")) {
-    digits = `0${digits}`;
-  }
-
-  return digits;
+  return String(value).replace(/\D/g, "").slice(0, 15);
 }
 
 export function formatPhoneInput(value) {
-  const normalized = normalizePhoneNumber(value);
-
-  return normalized.slice(0, 15);
+  return normalizePhoneNumber(value);
 }
 
 export function isValidPhoneNumber(value) {
   const normalized = normalizePhoneNumber(value);
 
-  return /^08\d{7,13}$/.test(normalized);
+  return /^08\d{8,13}$/.test(normalized);
 }
 
 export function getPhoneError(value) {
@@ -34,10 +24,10 @@ export function getPhoneError(value) {
   }
 
   if (!normalized.startsWith("08")) {
-    return "Nomor telepon harus diawali 08 atau +62.";
+    return "Nomor telepon harus diawali 08.";
   }
 
-  if (normalized.length < 9) {
+  if (normalized.length < 10) {
     return "Nomor telepon terlalu pendek.";
   }
 
