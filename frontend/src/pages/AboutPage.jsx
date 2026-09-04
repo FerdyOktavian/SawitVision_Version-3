@@ -4,7 +4,7 @@ const MATURITY_CLASSES = [
   {
     key: "belum_masak",
     icon: "🟢",
-    title: "Belum Masak",
+    title: "Belum Matang",
     description:
       "Buah masih belum mencapai tingkat kematangan optimal untuk dipanen.",
     hint:
@@ -13,7 +13,7 @@ const MATURITY_CLASSES = [
   {
     key: "masak",
     icon: "🟠",
-    title: "Masak",
+    title: "Matang",
     description:
       "Buah berada pada tingkat kematangan yang sesuai untuk dipanen.",
     hint:
@@ -22,7 +22,7 @@ const MATURITY_CLASSES = [
   {
     key: "terlalu_masak",
     icon: "🔴",
-    title: "Terlalu Masak",
+    title: "Terlalu Matang",
     description:
       "Buah telah melewati tingkat kematangan optimal.",
     hint:
@@ -278,7 +278,7 @@ function AboutPage({
           <small>Contoh</small>
 
           <div>
-            <span>Masak</span>
+            <span>Matang</span>
             <strong>94%</strong>
           </div>
 

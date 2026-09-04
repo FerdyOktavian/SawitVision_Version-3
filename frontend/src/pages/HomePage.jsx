@@ -43,7 +43,7 @@ function HomePage({ currentUser, onStartPrediction, onOpenHistory }) {
             <div className="maturity-card-icon">🟢</div>
 
             <div>
-              <h3>Belum Masak</h3>
+              <h3>Belum Matang</h3>
               <p>
                 Buah masih dalam tahap awal dan belum mencapai kondisi panen
                 optimal.
@@ -55,7 +55,7 @@ function HomePage({ currentUser, onStartPrediction, onOpenHistory }) {
             <div className="maturity-card-icon">🟠</div>
 
             <div>
-              <h3>Masak</h3>
+              <h3>Matang</h3>
               <p>
                 Buah telah mencapai tingkat kematangan yang sesuai untuk proses
                 pemanenan.
@@ -67,7 +67,7 @@ function HomePage({ currentUser, onStartPrediction, onOpenHistory }) {
             <div className="maturity-card-icon">🔴</div>
 
             <div>
-              <h3>Terlalu Masak</h3>
+              <h3>Terlalu Matang</h3>
               <p>
                 Buah telah melewati tingkat kematangan optimal dan sebaiknya
                 segera ditangani.

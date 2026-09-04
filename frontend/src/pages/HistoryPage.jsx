@@ -8,15 +8,15 @@ import {
 
 const CLASS_META = {
   belum_masak: {
-    label: "Belum Masak",
+    label: "Belum Matang",
     icon: "🟢",
   },
   masak: {
-    label: "Masak",
+    label: "Matang",
     icon: "🟠",
   },
   terlalu_masak: {
-    label: "Terlalu Masak",
+    label: "Terlalu Matang",
     icon: "🔴",
   },
 };
@@ -66,7 +66,7 @@ function getHistoryItems(response) {
   return [];
 }
 
-function HistoryPage({ currentUser, onStartPrediction }) {
+function HistoryPage({ onStartPrediction }) {
   const [historyItems, setHistoryItems] = useState([]);
   const [stats, setStats] = useState(null);
 
@@ -102,7 +102,35 @@ function HistoryPage({ currentUser, onStartPrediction }) {
   };
 
   useEffect(() => {
-    loadHistory();
+    let isCancelled = false;
+
+    Promise.all([
+      getPredictions({
+        limit: 100,
+        offset: 0,
+      }),
+      getPredictionStats(),
+    ])
+      .then(([historyResponse, statsResponse]) => {
+        if (isCancelled) return;
+
+        setHistoryItems(getHistoryItems(historyResponse));
+        setStats(statsResponse);
+      })
+      .catch((error) => {
+        if (isCancelled) return;
+
+        setErrorMessage(error.message || "Riwayat prediksi gagal dimuat.");
+      })
+      .finally(() => {
+        if (isCancelled) return;
+
+        setIsLoading(false);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
   }, []);
 
   const filteredItems = useMemo(() => {
@@ -245,11 +273,11 @@ function HistoryPage({ currentUser, onStartPrediction }) {
         >
           <option value="all">Semua kelas</option>
 
-          <option value="belum_masak">Belum Masak</option>
+          <option value="belum_masak">Belum Matang</option>
 
-          <option value="masak">Masak</option>
+          <option value="masak">Matang</option>
 
-          <option value="terlalu_masak">Terlalu Masak</option>
+          <option value="terlalu_masak">Terlalu Matang</option>
         </select>
 
         <button

@@ -7,7 +7,7 @@ const ZOOM_STEP = 0.2;
 
 const CLASS_INFO = {
   belum_masak: {
-    label: "Belum Masak",
+    label: "Belum Matang",
     icon: "🟢",
     status: "Belum siap dipanen",
     description:
@@ -16,7 +16,7 @@ const CLASS_INFO = {
       "Lakukan pemeriksaan kembali setelah buah menunjukkan perubahan warna dan ciri kematangan yang lebih jelas.",
   },
   masak: {
-    label: "Masak",
+    label: "Matang",
     icon: "🟠",
     status: "Siap dipanen",
     description:
@@ -25,7 +25,7 @@ const CLASS_INFO = {
       "Buah dapat diprioritaskan untuk proses panen sesuai kondisi lapangan.",
   },
   terlalu_masak: {
-    label: "Terlalu Masak",
+    label: "Terlalu Matang",
     icon: "🔴",
     status: "Melewati kematangan optimal",
     description: "Buah telah melewati tingkat kematangan optimal.",
