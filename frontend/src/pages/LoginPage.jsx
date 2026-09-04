@@ -81,7 +81,7 @@ function LoginPage({
           <div>
             <p className="auth-eyebrow">SawitVision V3</p>
 
-            <h1>Klasifikasi Kematangan Sawit</h1>
+            <h1>Klasifikasi Kematangan Buah Sawit</h1>
 
             <p className="auth-description">
               Masuk menggunakan nama dan nomor telepon yang sudah terdaftar.
