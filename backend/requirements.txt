@@ -1,3 +1,6 @@
+# LEGACY EfficientNet/TensorFlow environment only.
+# Do not use this file for Docker/Railway production.
+
 fastapi
 uvicorn[standard]
 python-multipart

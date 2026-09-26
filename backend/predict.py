@@ -1,17 +1,15 @@
-"""
-Load model EfficientNetV2S dan menjalankan klasifikasi gambar.
-"""
+"""Compatibility boundary for legacy EfficientNet and the new AI pipeline."""
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.applications.efficientnet_v2 import (
-    preprocess_input,
-)
+from config_utils import env_int
 
-from model_downloader import ensure_model_downloaded
+if TYPE_CHECKING:
+    from PIL import Image
+
+    from ai_pipeline import AIPipeline
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -22,7 +20,9 @@ CLASS_NAMES_PATH = Path(
     )
 )
 
-MODEL_INPUT_SIZE = int(os.getenv("MODEL_INPUT_SIZE", "224"))
+MODEL_INPUT_SIZE = env_int(
+    "MODEL_INPUT_SIZE", 224, minimum=1, maximum=8192
+)
 
 
 def load_class_names() -> list[str]:
@@ -50,6 +50,10 @@ def load_sawit_model(model_path: str | None = None):
     """
     Memuat model tanpa compile karena backend hanya melakukan inferensi.
     """
+    # Keep the Hugging Face legacy downloader out of active production
+    # startup. It is imported only if this rollback function is called.
+    from model_downloader import ensure_model_downloaded
+
     resolved_path = Path(
         model_path or ensure_model_downloaded()
     ).resolve()
@@ -60,6 +64,11 @@ def load_sawit_model(model_path: str | None = None):
         )
 
     print(f"Memuat model SawitVision V3: {resolved_path}")
+
+    # Keep TensorFlow lazy so the new PyTorch proof-of-concept environment
+    # can run without importing the legacy runtime. The function and model
+    # remain available for rollback or side-by-side validation.
+    import tensorflow as tf
 
     return tf.keras.models.load_model(
         str(resolved_path),
@@ -97,6 +106,12 @@ def predict_image(
     class_names: list[str],
 ):
     """Melakukan prediksi dan mengembalikan kelas serta probabilitas."""
+    import numpy as np
+    import tensorflow as tf
+    from tensorflow.keras.applications.efficientnet_v2 import (
+        preprocess_input,
+    )
+
     target_size = _resolve_target_size(model)
 
     image = tf.keras.utils.load_img(
@@ -129,3 +144,18 @@ def predict_image(
     }
 
     return predicted_class, confidence, probabilities
+
+
+def load_ai_pipeline() -> "AIPipeline":
+    """Load the YOLO11n -> DINOv2 pipeline once for this server process."""
+    from ai_pipeline import AIPipeline
+
+    return AIPipeline.from_environment()
+
+
+def predict_image_with_pipeline(
+    pipeline: "AIPipeline",
+    image: "Image.Image",
+) -> dict:
+    """Compatibility adapter used by ``main.py`` during the POC phase."""
+    return pipeline.predict(image)

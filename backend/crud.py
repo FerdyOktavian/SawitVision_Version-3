@@ -4,10 +4,19 @@ Operasi database untuk prediksi SawitVision V3.
 Semua query memakai tabel pada schema public Supabase PostgreSQL.
 """
 
+import math
+from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+
+DETECTION_CLASS_TO_INDEX = {
+    "belum_masak": 0,
+    "masak": 1,
+    "terlalu_masak": 2,
+}
 
 
 def get_active_model_version(db: Session) -> Optional[str]:
@@ -42,6 +51,12 @@ def save_prediction_record(
     file_size_bytes: Optional[int] = None,
     device_info: Optional[dict[str, Any]] = None,
     notes: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    location_accuracy: Optional[float] = None,
+    location_captured_at: Optional[datetime] = None,
+    location_auto_name: Optional[str] = None,
+    location_label: Optional[str] = None,
 ) -> dict[str, Any]:
     """Menyimpan satu hasil prediksi ke riwayat."""
     model_version_id = get_active_model_version(db)
@@ -66,7 +81,13 @@ def save_prediction_record(
                     image_height,
                     file_size_bytes,
                     device_info,
-                    notes
+                    notes,
+                    latitude,
+                    longitude,
+                    location_accuracy,
+                    location_captured_at,
+                    location_auto_name,
+                    location_label
                 )
                 VALUES (
                     :model_version_id,
@@ -84,7 +105,13 @@ def save_prediction_record(
                     :image_height,
                     :file_size_bytes,
                     CAST(:device_info AS JSONB),
-                    :notes
+                    :notes,
+                    :latitude,
+                    :longitude,
+                    :location_accuracy,
+                    :location_captured_at,
+                    :location_auto_name,
+                    :location_label
                 )
                 RETURNING id, created_at
                 """
@@ -114,6 +141,12 @@ def save_prediction_record(
                     default=str,
                 ),
                 "notes": notes,
+                "latitude": latitude,
+                "longitude": longitude,
+                "location_accuracy": location_accuracy,
+                "location_captured_at": location_captured_at,
+                "location_auto_name": location_auto_name,
+                "location_label": location_label,
             },
         ).fetchone()
 
@@ -131,6 +164,161 @@ def save_prediction_record(
             else None
         ),
     }
+
+
+def _validated_percentage(value: Any, field_name: str) -> float:
+    """Validate the public API's 0-100 confidence/probability scale."""
+    number = float(value)
+    if not math.isfinite(number) or not 0 <= number <= 100:
+        raise ValueError(
+            f"{field_name} harus berupa angka finite pada rentang 0-100."
+        )
+    return number
+
+
+def save_prediction_detections(
+    db: Session,
+    prediction_record_id: str,
+    detections: list[dict[str, Any]],
+) -> int:
+    """Persist every valid per-TBS result in one child transaction.
+
+    ``detection_index`` is the stable zero-based list position. The parent
+    prediction record is already committed by ``save_prediction_record``;
+    therefore a child failure rolls back every child row without deleting the
+    otherwise valid parent history record.
+    """
+    if not detections:
+        return 0
+    if not prediction_record_id:
+        raise ValueError("prediction_record_id wajib diisi.")
+
+    parameters: list[dict[str, Any]] = []
+    for detection_index, detection in enumerate(detections):
+        bbox = detection.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise ValueError(
+                f"bbox detection_index={detection_index} harus berisi 4 nilai."
+            )
+
+        coordinates: list[int] = []
+        for coordinate_name, raw_value in zip(
+            ("x1", "y1", "x2", "y2"),
+            bbox,
+            strict=True,
+        ):
+            numeric_value = float(raw_value)
+            if not math.isfinite(numeric_value) or not numeric_value.is_integer():
+                raise ValueError(
+                    f"{coordinate_name} detection_index={detection_index} "
+                    "harus berupa integer finite."
+                )
+            coordinates.append(int(numeric_value))
+
+        x1, y1, x2, y2 = coordinates
+        if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
+            raise ValueError(
+                f"bbox detection_index={detection_index} tidak valid: {bbox!r}."
+            )
+
+        maturity_class = str(detection.get("predicted_class", ""))
+        expected_class_index = DETECTION_CLASS_TO_INDEX.get(maturity_class)
+        maturity_class_index = int(detection.get("class_index", -1))
+        if expected_class_index is None:
+            raise ValueError(
+                f"Kelas detection_index={detection_index} tidak valid: "
+                f"{maturity_class!r}."
+            )
+        if maturity_class_index != expected_class_index:
+            raise ValueError(
+                f"class_index detection_index={detection_index} tidak cocok "
+                f"dengan kelas {maturity_class!r}."
+            )
+
+        probabilities = detection.get("probabilities")
+        if not isinstance(probabilities, dict):
+            raise ValueError(
+                f"probabilities detection_index={detection_index} wajib berupa "
+                "dictionary."
+            )
+
+        parameters.append(
+            {
+                "prediction_record_id": prediction_record_id,
+                "detection_index": detection_index,
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "detector_confidence": _validated_percentage(
+                    detection.get("detector_confidence"),
+                    f"detector_confidence detection_index={detection_index}",
+                ),
+                "maturity_class": maturity_class,
+                "maturity_class_index": maturity_class_index,
+                "maturity_confidence": _validated_percentage(
+                    detection.get("maturity_confidence"),
+                    f"maturity_confidence detection_index={detection_index}",
+                ),
+                "prob_belum_masak": _validated_percentage(
+                    probabilities.get("belum_masak"),
+                    f"prob_belum_masak detection_index={detection_index}",
+                ),
+                "prob_masak": _validated_percentage(
+                    probabilities.get("masak"),
+                    f"prob_masak detection_index={detection_index}",
+                ),
+                "prob_terlalu_masak": _validated_percentage(
+                    probabilities.get("terlalu_masak"),
+                    f"prob_terlalu_masak detection_index={detection_index}",
+                ),
+            }
+        )
+
+    try:
+        db.execute(
+            text(
+                """
+                INSERT INTO public.prediction_detections (
+                    prediction_record_id,
+                    detection_index,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    detector_confidence,
+                    maturity_class,
+                    maturity_class_index,
+                    maturity_confidence,
+                    prob_belum_masak,
+                    prob_masak,
+                    prob_terlalu_masak
+                )
+                VALUES (
+                    :prediction_record_id,
+                    :detection_index,
+                    :x1,
+                    :y1,
+                    :x2,
+                    :y2,
+                    :detector_confidence,
+                    :maturity_class,
+                    :maturity_class_index,
+                    :maturity_confidence,
+                    :prob_belum_masak,
+                    :prob_masak,
+                    :prob_terlalu_masak
+                )
+                """
+            ),
+            parameters,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return len(parameters)
 
 
 def _prediction_row_to_dict(row) -> dict[str, Any]:
@@ -220,6 +408,52 @@ def count_prediction_records(
     return int(total or 0)
 
 
+def get_prediction_detections(
+    db: Session,
+    prediction_record_id: str,
+) -> list[dict[str, Any]]:
+    """Return persisted per-TBS results in their stable inference order."""
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                detection_index,
+                x1,
+                y1,
+                x2,
+                y2,
+                detector_confidence,
+                maturity_class,
+                maturity_class_index,
+                maturity_confidence,
+                prob_belum_masak,
+                prob_masak,
+                prob_terlalu_masak
+            FROM public.prediction_detections
+            WHERE prediction_record_id = :prediction_record_id
+            ORDER BY detection_index ASC
+            """
+        ),
+        {"prediction_record_id": prediction_record_id},
+    ).fetchall()
+
+    return [
+        {
+            "bbox": [int(row[1]), int(row[2]), int(row[3]), int(row[4])],
+            "detector_confidence": float(row[5]),
+            "predicted_class": row[6],
+            "class_index": int(row[7]),
+            "maturity_confidence": float(row[8]),
+            "probabilities": {
+                "belum_masak": float(row[9]),
+                "masak": float(row[10]),
+                "terlalu_masak": float(row[11]),
+            },
+        }
+        for row in rows
+    ]
+
+
 def get_prediction_record_by_id(
     db: Session,
     record_id: str,
@@ -248,7 +482,13 @@ def get_prediction_record_by_id(
                 image_width,
                 image_height,
                 file_size_bytes,
-                created_at
+                created_at,
+                latitude,
+                longitude,
+                location_accuracy,
+                location_captured_at,
+                location_auto_name,
+                location_label
             FROM public.prediction_records
             WHERE id = :record_id
             {user_filter}
@@ -261,14 +501,53 @@ def get_prediction_record_by_id(
         },
     ).fetchone()
 
-    return _prediction_row_to_dict(row) if row else None
+    if row is None:
+        return None
+
+    record = _prediction_row_to_dict(row)
+    location_available = row[13] is not None and row[14] is not None
+    record["location"] = {
+        "available": location_available,
+        "latitude": float(row[13]) if location_available else None,
+        "longitude": float(row[14]) if location_available else None,
+        "accuracy_meters": (
+            float(row[15])
+            if location_available and row[15] is not None
+            else None
+        ),
+        "captured_at": (
+            row[16].isoformat()
+            if location_available and row[16] is not None
+            else None
+        ),
+        "auto_name": row[17],
+        "label": row[18],
+    }
+    detections = get_prediction_detections(db, record_id)
+    counts = {class_name: 0 for class_name in DETECTION_CLASS_TO_INDEX}
+    for detection in detections:
+        class_name = detection["predicted_class"]
+        if class_name in counts:
+            counts[class_name] += 1
+
+    record.update(
+        {
+            "detection_details_available": bool(detections),
+            "summary": {
+                "total_detections": len(detections),
+                "by_class": counts,
+            },
+            "detections": detections,
+        }
+    )
+    return record
 
 
 def get_prediction_stats(
     db: Session,
     user_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Mengambil statistik total dan rata-rata confidence per kelas."""
+    """Mengambil statistik image-level lama dan statistik multi-TBS."""
     user_filter = "WHERE user_id = :user_id" if user_id else ""
     params = {"user_id": user_id}
 
@@ -307,10 +586,132 @@ def get_prediction_stats(
         for row in rows
     }
 
-    return {
-        "total_predictions": int(total or 0),
-        "by_class": by_class,
+    total_images = int(total or 0)
+    summary_by_class = {
+        class_name: int(by_class.get(class_name, {}).get("total", 0))
+        for class_name in DETECTION_CLASS_TO_INDEX
     }
+
+    return {
+        "total_predictions": total_images,
+        "by_class": by_class,
+        "image_stats": {
+            "total_images": total_images,
+            "by_summary_class": summary_by_class,
+        },
+        "tbs_stats": get_tbs_statistics(
+            db=db,
+            total_images=total_images,
+            user_id=user_id,
+        ),
+    }
+
+
+def build_empty_tbs_statistics(total_images: int = 0) -> dict[str, Any]:
+    """Membentuk statistik TBS kosong tanpa menganggap record lama sebagai TBS nol."""
+    total_images = int(total_images or 0)
+    return {
+        "total_tbs": 0,
+        "by_class": {
+            class_name: {
+                "total": 0,
+                "avg_maturity_confidence": None,
+            }
+            for class_name in DETECTION_CLASS_TO_INDEX
+        },
+        "avg_detector_confidence": None,
+        "coverage": {
+            "images_with_detection_details": 0,
+            "images_without_detection_details": total_images,
+            "coverage_percentage": 0.0,
+        },
+    }
+
+
+def get_tbs_statistics(
+    db: Session,
+    total_images: int,
+    user_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Mengagregasi child detection, dengan scope user melalui parent record."""
+    user_filter = "WHERE pr.user_id = :user_id" if user_id is not None else ""
+    params = {"user_id": user_id} if user_id is not None else {}
+
+    overview_row = db.execute(
+        text(
+            f"""
+            SELECT
+                COUNT(pd.id) AS total_tbs,
+                AVG(pd.detector_confidence) AS avg_detector_confidence,
+                COUNT(DISTINCT pd.prediction_record_id)
+                    AS images_with_detection_details
+            FROM public.prediction_detections pd
+            INNER JOIN public.prediction_records pr
+                ON pr.id = pd.prediction_record_id
+            {user_filter}
+            """
+        ),
+        params,
+    ).fetchone()
+
+    class_rows = db.execute(
+        text(
+            f"""
+            SELECT
+                pd.maturity_class,
+                COUNT(pd.id) AS total,
+                AVG(pd.maturity_confidence) AS avg_maturity_confidence
+            FROM public.prediction_detections pd
+            INNER JOIN public.prediction_records pr
+                ON pr.id = pd.prediction_record_id
+            {user_filter}
+            GROUP BY pd.maturity_class
+            ORDER BY pd.maturity_class
+            """
+        ),
+        params,
+    ).fetchall()
+
+    stats = build_empty_tbs_statistics(total_images)
+    total_tbs = int(overview_row[0] or 0) if overview_row else 0
+    avg_detector_confidence = (
+        round(float(overview_row[1]), 2)
+        if overview_row and overview_row[1] is not None
+        else None
+    )
+    images_with_details = int(overview_row[2] or 0) if overview_row else 0
+    images_without_details = max(int(total_images or 0) - images_with_details, 0)
+    coverage_percentage = (
+        round((images_with_details / int(total_images)) * 100, 2)
+        if total_images
+        else 0.0
+    )
+
+    for row in class_rows:
+        class_name = row[0]
+        if class_name not in stats["by_class"]:
+            continue
+        stats["by_class"][class_name] = {
+            "total": int(row[1]),
+            "avg_maturity_confidence": (
+                round(float(row[2]), 2)
+                if row[2] is not None
+                else None
+            ),
+        }
+
+    stats.update(
+        {
+            "total_tbs": total_tbs,
+            "avg_detector_confidence": avg_detector_confidence,
+            "coverage": {
+                "images_with_detection_details": images_with_details,
+                "images_without_detection_details": images_without_details,
+                "coverage_percentage": coverage_percentage,
+            },
+        }
+    )
+    return stats
 
 
 def update_prediction_images(
@@ -348,21 +749,65 @@ def update_prediction_images(
         raise
 
 
+def update_prediction_location_label(
+    db: Session,
+    record_id: str,
+    user_id: str,
+    location_label: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """Update only the editable label on a prediction owned by the user."""
+    try:
+        row = db.execute(
+            text(
+                """
+                UPDATE public.prediction_records
+                SET
+                    location_label = :location_label,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = :record_id
+                  AND user_id = :user_id
+                RETURNING id, location_auto_name, location_label
+                """
+            ),
+            {
+                "record_id": record_id,
+                "user_id": user_id,
+                "location_label": location_label,
+            },
+        ).fetchone()
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    if row is None:
+        return None
+
+    return {
+        "id": str(row[0]),
+        "location_auto_name": row[1],
+        "location_label": row[2],
+    }
+
+
 def delete_prediction_record(
     db: Session,
     record_id: str,
+    user_id: str,
 ) -> Optional[str]:
-    """Menghapus satu record riwayat prediksi."""
+    """Delete one prediction only when it belongs to the requesting user."""
     try:
         row = db.execute(
             text(
                 """
                 DELETE FROM public.prediction_records
                 WHERE id = :record_id
+                  AND user_id = :user_id
                 RETURNING id
                 """
             ),
-            {"record_id": record_id},
+            {"record_id": record_id, "user_id": user_id},
         ).fetchone()
 
         db.commit()

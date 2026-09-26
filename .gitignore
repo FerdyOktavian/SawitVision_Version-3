@@ -14,6 +14,18 @@ backend/.env
 backend/.env.*
 !backend/.env.example
 
+# Credential exports and ad-hoc secret files must never enter Git.
+*connection string*.txt
+*connection-string*.txt
+credentials/
+secrets/
+*.credentials
+*.secret
+*.pem
+*.key
+*.p12
+*.pfx
+
 
 # =========================
 # PYTHON / FASTAPI

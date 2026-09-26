@@ -39,9 +39,9 @@ def _excel_safe_datetime(value):
 
 
 CLASS_LABELS = {
-    "belum_masak": "Belum Masak",
-    "masak": "Masak",
-    "terlalu_masak": "Terlalu Masak",
+    "belum_masak": "Belum Matang",
+    "masak": "Matang",
+    "terlalu_masak": "Terlalu Matang",
 }
 
 HEADER_FILL = PatternFill("solid", fgColor="2F7D32")
@@ -156,6 +156,58 @@ def get_user_prediction_report_data(
         for row in rows
     ]
 
+    detection_rows = db.execute(
+        text(f"""
+            SELECT
+                pd.prediction_record_id,
+                pr.created_at,
+                pd.detection_index,
+                pd.maturity_class,
+                pd.maturity_confidence,
+                pd.detector_confidence,
+                pd.prob_belum_masak,
+                pd.prob_masak,
+                pd.prob_terlalu_masak,
+                pd.x1,
+                pd.y1,
+                pd.x2,
+                pd.y2,
+                pr.input_source,
+                COALESCE(
+                    pr.image_processed_url,
+                    pr.image_thumbnail_url,
+                    pr.image_original_url
+                ) AS image_url
+            FROM public.prediction_detections pd
+            INNER JOIN public.prediction_records pr
+                ON pr.id = pd.prediction_record_id
+            WHERE {' AND '.join(filters)}
+            ORDER BY pr.created_at ASC, pr.id ASC, pd.detection_index ASC
+        """),
+        params,
+    ).fetchall()
+
+    detections = [
+        {
+            "prediction_record_id": str(row[0]),
+            "created_at": _excel_safe_datetime(row[1]),
+            "detection_index": int(row[2]),
+            "maturity_class": row[3],
+            "maturity_confidence": float(row[4]),
+            "detector_confidence": float(row[5]),
+            "prob_belum_masak": float(row[6]),
+            "prob_masak": float(row[7]),
+            "prob_terlalu_masak": float(row[8]),
+            "x1": int(row[9]),
+            "y1": int(row[10]),
+            "x2": int(row[11]),
+            "y2": int(row[12]),
+            "input_source": row[13] or "-",
+            "image_url": row[14] or "",
+        }
+        for row in detection_rows
+    ]
+
     return {
         "user": {
             "id": str(user_row[0]),
@@ -164,6 +216,7 @@ def get_user_prediction_report_data(
             "created_at": _excel_safe_datetime(user_row[3]),
         },
         "records": records,
+        "detections": detections,
         "start_date": start_date,
         "end_date": end_date,
     }
@@ -240,6 +293,66 @@ def get_admin_prediction_report_data(
         for row in rows
     ]
 
+    detection_rows = db.execute(
+        text(f"""
+            SELECT
+                pd.prediction_record_id,
+                pr.created_at,
+                pd.detection_index,
+                pd.maturity_class,
+                pd.maturity_confidence,
+                pd.detector_confidence,
+                pd.prob_belum_masak,
+                pd.prob_masak,
+                pd.prob_terlalu_masak,
+                pd.x1,
+                pd.y1,
+                pd.x2,
+                pd.y2,
+                pr.input_source,
+                COALESCE(
+                    pr.image_processed_url,
+                    pr.image_thumbnail_url,
+                    pr.image_original_url
+                ) AS image_url,
+                u.id,
+                u.full_name,
+                u.phone_number
+            FROM public.prediction_detections pd
+            INNER JOIN public.prediction_records pr
+                ON pr.id = pd.prediction_record_id
+            LEFT JOIN public.users u
+                ON u.id = pr.user_id
+            WHERE {' AND '.join(filters)}
+            ORDER BY pr.created_at ASC, pr.id ASC, pd.detection_index ASC
+        """),
+        params,
+    ).fetchall()
+
+    detections = [
+        {
+            "prediction_record_id": str(row[0]),
+            "created_at": _excel_safe_datetime(row[1]),
+            "detection_index": int(row[2]),
+            "maturity_class": row[3],
+            "maturity_confidence": float(row[4]),
+            "detector_confidence": float(row[5]),
+            "prob_belum_masak": float(row[6]),
+            "prob_masak": float(row[7]),
+            "prob_terlalu_masak": float(row[8]),
+            "x1": int(row[9]),
+            "y1": int(row[10]),
+            "x2": int(row[11]),
+            "y2": int(row[12]),
+            "input_source": row[13] or "-",
+            "image_url": row[14] or "",
+            "user_id": str(row[15]) if row[15] else None,
+            "user_name": row[16] or "Tidak diketahui",
+            "user_phone_number": row[17] or "-",
+        }
+        for row in detection_rows
+    ]
+
     user_count = db.execute(
         text("SELECT COUNT(*) FROM users WHERE role = 'user'")
     ).scalar()
@@ -250,6 +363,7 @@ def get_admin_prediction_report_data(
 
     return {
         "records": records,
+        "detections": detections,
         "start_date": start_date,
         "end_date": end_date,
         "selected_user_id": user_id,
@@ -280,6 +394,62 @@ def _calculate_summary(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "total": len(records),
         "counts": counts,
         "average_confidence": average_confidence,
+    }
+
+
+def _calculate_tbs_summary(
+    detections: Iterable[Dict[str, Any]],
+    total_images: int,
+) -> Dict[str, Any]:
+    detections = list(detections)
+    counts = {key: 0 for key in CLASS_LABELS}
+    maturity_confidences: List[float] = []
+    detector_confidences: List[float] = []
+    image_ids = set()
+
+    for item in detections:
+        class_name = item.get("maturity_class")
+        if class_name in counts:
+            counts[class_name] += 1
+
+        maturity_confidence = item.get("maturity_confidence")
+        if maturity_confidence is not None:
+            maturity_confidences.append(float(maturity_confidence))
+
+        detector_confidence = item.get("detector_confidence")
+        if detector_confidence is not None:
+            detector_confidences.append(float(detector_confidence))
+
+        prediction_record_id = item.get("prediction_record_id")
+        if prediction_record_id:
+            image_ids.add(str(prediction_record_id))
+
+    total_images = int(total_images or 0)
+    images_with_details = len(image_ids)
+    images_without_details = max(total_images - images_with_details, 0)
+    coverage_percentage = (
+        images_with_details / total_images * 100
+        if total_images
+        else 0.0
+    )
+
+    return {
+        "total_images": total_images,
+        "total_tbs": len(detections),
+        "counts": counts,
+        "average_maturity_confidence": (
+            sum(maturity_confidences) / len(maturity_confidences)
+            if maturity_confidences
+            else None
+        ),
+        "average_detector_confidence": (
+            sum(detector_confidences) / len(detector_confidences)
+            if detector_confidences
+            else None
+        ),
+        "images_with_detection_details": images_with_details,
+        "images_without_detection_details": images_without_details,
+        "coverage_percentage": coverage_percentage,
     }
 
 
@@ -344,6 +514,423 @@ def _style_kpi_card(ws, cell_range: str, label: str, value: Any, fill_color: str
         top=Side(style="medium", color=fill_color),
         bottom=Side(style="medium", color=fill_color),
     )
+
+
+def _write_tbs_summary_section(
+    ws,
+    summary: Dict[str, Any],
+    start_row: int,
+) -> int:
+    ws.merge_cells(
+        start_row=start_row,
+        start_column=1,
+        end_row=start_row,
+        end_column=4,
+    )
+    title_cell = ws.cell(
+        row=start_row,
+        column=1,
+        value="Ringkasan Statistik TBS",
+    )
+    title_cell.fill = TITLE_FILL
+    title_cell.font = Font(color="FFFFFF", bold=True, size=14)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[start_row].height = 26
+
+    header_row = start_row + 2
+    ws.cell(row=header_row, column=1, value="Metrik")
+    ws.cell(row=header_row, column=2, value="Nilai")
+    _apply_table_header(ws, header_row, 2)
+
+    has_available_details = (
+        summary["images_with_detection_details"] > 0
+        or summary["total_images"] == 0
+    )
+    unavailable_value = "Belum tersedia"
+    tbs_total_value = (
+        summary["total_tbs"]
+        if has_available_details
+        else unavailable_value
+    )
+
+    metrics = [
+        ("Total Foto Tersimpan", summary["total_images"], False),
+        ("Total TBS", tbs_total_value, False),
+        (
+            "TBS Belum Matang",
+            summary["counts"]["belum_masak"]
+            if has_available_details
+            else unavailable_value,
+            False,
+        ),
+        (
+            "TBS Matang",
+            summary["counts"]["masak"]
+            if has_available_details
+            else unavailable_value,
+            False,
+        ),
+        (
+            "TBS Terlalu Matang",
+            summary["counts"]["terlalu_masak"]
+            if has_available_details
+            else unavailable_value,
+            False,
+        ),
+        (
+            "Average Maturity Confidence",
+            (
+                summary["average_maturity_confidence"] / 100
+                if summary["average_maturity_confidence"] is not None
+                else unavailable_value
+            ),
+            summary["average_maturity_confidence"] is not None,
+        ),
+        (
+            "Average Detector Confidence",
+            (
+                summary["average_detector_confidence"] / 100
+                if summary["average_detector_confidence"] is not None
+                else unavailable_value
+            ),
+            summary["average_detector_confidence"] is not None,
+        ),
+        (
+            "Images With Detection Details",
+            summary["images_with_detection_details"],
+            False,
+        ),
+        (
+            "Images Without Detection Details",
+            summary["images_without_detection_details"],
+            False,
+        ),
+        ("Coverage %", summary["coverage_percentage"] / 100, True),
+    ]
+
+    for offset, (label, value, is_percentage) in enumerate(metrics, start=1):
+        row = header_row + offset
+        ws.cell(row=row, column=1, value=label)
+        ws.cell(row=row, column=2, value=value)
+        if is_percentage:
+            ws.cell(row=row, column=2).number_format = "0.00%"
+
+    last_row = header_row + len(metrics)
+    _apply_body_borders(ws, header_row + 1, last_row, 2)
+
+    if (
+        summary["total_images"] > 0
+        and summary["coverage_percentage"] < 100
+    ):
+        note_row = last_row + 2
+        ws.merge_cells(
+            start_row=note_row,
+            start_column=1,
+            end_row=note_row,
+            end_column=4,
+        )
+        note_cell = ws.cell(
+            row=note_row,
+            column=1,
+            value=(
+                "Statistik TBS dihitung dari hasil yang memiliki detail "
+                "multi-deteksi tersimpan."
+            ),
+        )
+        note_cell.fill = ACCENT_FILL
+        note_cell.font = Font(italic=True, color="6F4B13")
+        note_cell.alignment = Alignment(wrap_text=True)
+        return note_row
+
+    return last_row
+
+
+def _add_tbs_detail_sheet(
+    wb: Workbook,
+    detections: List[Dict[str, Any]],
+    period_label: str,
+    include_user: bool = False,
+    user_name: Optional[str] = None,
+) -> None:
+    ws = wb.create_sheet("Detail TBS")
+    subtitle_parts = [f"Periode: {period_label}"]
+    if user_name:
+        subtitle_parts.insert(0, f"Pengguna: {user_name}")
+
+    _style_title(
+        ws,
+        "Detail TBS",
+        " | ".join(subtitle_parts),
+    )
+
+    headers = ["No", "ID Prediksi"]
+    if include_user:
+        headers.extend(["User ID", "Nama User", "Nomor Telepon"])
+    headers.extend(
+        [
+            "Tanggal",
+            "Waktu",
+            "TBS Ke",
+            "Kelas Kematangan",
+            "Confidence Kematangan",
+            "Confidence Deteksi",
+            "Prob Belum Matang",
+            "Prob Matang",
+            "Prob Terlalu Matang",
+            "X1",
+            "Y1",
+            "X2",
+            "Y2",
+            "Sumber Gambar",
+            "URL Gambar",
+        ]
+    )
+
+    header_row = 4
+    for column, header in enumerate(headers, start=1):
+        ws.cell(row=header_row, column=column, value=header)
+    _apply_table_header(ws, header_row, len(headers))
+
+    for index, item in enumerate(detections, start=1):
+        row = header_row + index
+        created_at = item.get("created_at")
+        created_date = (
+            created_at.date()
+            if isinstance(created_at, datetime)
+            else created_at
+        )
+        created_time = (
+            created_at.time()
+            if isinstance(created_at, datetime)
+            else None
+        )
+        values = [index, item.get("prediction_record_id")]
+
+        if include_user:
+            values.extend(
+                [
+                    item.get("user_id"),
+                    item.get("user_name"),
+                    item.get("user_phone_number"),
+                ]
+            )
+
+        values.extend(
+            [
+                created_date,
+                created_time,
+                int(item.get("detection_index") or 0) + 1,
+                CLASS_LABELS.get(
+                    item.get("maturity_class"),
+                    item.get("maturity_class"),
+                ),
+                float(item.get("maturity_confidence") or 0) / 100,
+                float(item.get("detector_confidence") or 0) / 100,
+                float(item.get("prob_belum_masak") or 0) / 100,
+                float(item.get("prob_masak") or 0) / 100,
+                float(item.get("prob_terlalu_masak") or 0) / 100,
+                item.get("x1"),
+                item.get("y1"),
+                item.get("x2"),
+                item.get("y2"),
+                item.get("input_source"),
+                item.get("image_url") or "",
+            ]
+        )
+
+        for column, value in enumerate(values, start=1):
+            ws.cell(row=row, column=column, value=value)
+
+        offset = 3 if include_user else 0
+        date_column = 3 + offset
+        time_column = 4 + offset
+        first_percentage_column = 7 + offset
+        ws.cell(row=row, column=date_column).number_format = "dd/mm/yyyy"
+        ws.cell(row=row, column=time_column).number_format = "hh:mm:ss"
+        for column in range(
+            first_percentage_column,
+            first_percentage_column + 5,
+        ):
+            ws.cell(row=row, column=column).number_format = "0.00%"
+
+        image_url = item.get("image_url") or ""
+        if image_url:
+            url_cell = ws.cell(row=row, column=len(headers))
+            url_cell.hyperlink = image_url
+            url_cell.style = "Hyperlink"
+
+    if detections:
+        last_row = header_row + len(detections)
+        _apply_body_borders(ws, header_row + 1, last_row, len(headers))
+        ws.auto_filter.ref = (
+            f"A{header_row}:{get_column_letter(len(headers))}{last_row}"
+        )
+    else:
+        empty_row = header_row + 1
+        ws.merge_cells(
+            start_row=empty_row,
+            start_column=1,
+            end_row=empty_row,
+            end_column=len(headers),
+        )
+        ws.cell(
+            row=empty_row,
+            column=1,
+            value="Detail TBS belum tersedia untuk data pada periode ini.",
+        )
+        ws.cell(row=empty_row, column=1).alignment = Alignment(
+            horizontal="center"
+        )
+        ws.cell(row=empty_row, column=1).fill = ACCENT_FILL
+
+    ws.freeze_panes = "A5"
+    _auto_width(ws, max_width=34)
+    ws.column_dimensions["B"].width = 38
+    ws.column_dimensions[get_column_letter(len(headers))].width = 38
+    ws.sheet_view.zoomScale = 80
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+
+
+def _build_tbs_daily_summary(
+    detections: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    daily: Dict[date, Dict[str, Any]] = {}
+
+    for item in detections:
+        created_at = item.get("created_at")
+        if not created_at:
+            continue
+
+        day = (
+            created_at.date()
+            if isinstance(created_at, datetime)
+            else created_at
+        )
+        daily.setdefault(
+            day,
+            {
+                "date": day,
+                "total": 0,
+                "belum_masak": 0,
+                "masak": 0,
+                "terlalu_masak": 0,
+                "maturity_confidence_sum": 0.0,
+                "detector_confidence_sum": 0.0,
+            },
+        )
+        current = daily[day]
+        current["total"] += 1
+        class_name = item.get("maturity_class")
+        if class_name in CLASS_LABELS:
+            current[class_name] += 1
+        current["maturity_confidence_sum"] += float(
+            item.get("maturity_confidence") or 0
+        )
+        current["detector_confidence_sum"] += float(
+            item.get("detector_confidence") or 0
+        )
+
+    result = []
+    for day in sorted(daily):
+        item = daily[day]
+        result.append(
+            {
+                "date": item["date"],
+                "total": item["total"],
+                "belum_masak": item["belum_masak"],
+                "masak": item["masak"],
+                "terlalu_masak": item["terlalu_masak"],
+                "average_maturity_confidence": (
+                    item["maturity_confidence_sum"] / item["total"]
+                ),
+                "average_detector_confidence": (
+                    item["detector_confidence_sum"] / item["total"]
+                ),
+            }
+        )
+
+    return result
+
+
+def _add_tbs_daily_recap_sheet(
+    wb: Workbook,
+    detections: List[Dict[str, Any]],
+    period_label: str,
+    user_name: Optional[str] = None,
+) -> None:
+    ws = wb.create_sheet("Rekap TBS Harian")
+    subtitle_parts = [f"Periode: {period_label}"]
+    if user_name:
+        subtitle_parts.insert(0, f"Pengguna: {user_name}")
+
+    _style_title(
+        ws,
+        "Rekap TBS Harian",
+        " | ".join(subtitle_parts),
+    )
+
+    headers = [
+        "Tanggal",
+        "Total TBS",
+        "Belum Matang",
+        "Matang",
+        "Terlalu Matang",
+        "Avg Maturity Confidence",
+        "Avg Detector Confidence",
+    ]
+    header_row = 4
+    for column, header in enumerate(headers, start=1):
+        ws.cell(row=header_row, column=column, value=header)
+    _apply_table_header(ws, header_row, len(headers))
+
+    daily_rows = _build_tbs_daily_summary(detections)
+    for index, item in enumerate(daily_rows, start=1):
+        row = header_row + index
+        values = [
+            item["date"],
+            item["total"],
+            item["belum_masak"],
+            item["masak"],
+            item["terlalu_masak"],
+            item["average_maturity_confidence"] / 100,
+            item["average_detector_confidence"] / 100,
+        ]
+        for column, value in enumerate(values, start=1):
+            ws.cell(row=row, column=column, value=value)
+        ws.cell(row=row, column=1).number_format = "dd mmm yyyy"
+        ws.cell(row=row, column=6).number_format = "0.00%"
+        ws.cell(row=row, column=7).number_format = "0.00%"
+
+    if daily_rows:
+        last_row = header_row + len(daily_rows)
+        _apply_body_borders(ws, header_row + 1, last_row, len(headers))
+        ws.auto_filter.ref = f"A{header_row}:G{last_row}"
+    else:
+        empty_row = header_row + 1
+        ws.merge_cells(
+            start_row=empty_row,
+            start_column=1,
+            end_row=empty_row,
+            end_column=len(headers),
+        )
+        ws.cell(
+            row=empty_row,
+            column=1,
+            value="Belum ada detail TBS pada periode ini.",
+        )
+        ws.cell(row=empty_row, column=1).alignment = Alignment(
+            horizontal="center"
+        )
+        ws.cell(row=empty_row, column=1).fill = ACCENT_FILL
+
+    ws.freeze_panes = "A5"
+    _auto_width(ws, max_width=30)
+    ws.sheet_view.zoomScale = 90
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
 
 
 def _add_distribution_charts(
@@ -721,7 +1308,9 @@ def build_user_report_workbook(data: Dict[str, Any]) -> io.BytesIO:
 
     user = data["user"]
     records = data["records"]
+    detections = data.get("detections", [])
     summary = _calculate_summary(records)
+    tbs_summary = _calculate_tbs_summary(detections, len(records))
     period_label = build_period_label(data["start_date"], data["end_date"])
 
     _style_title(
@@ -811,6 +1400,12 @@ def build_user_report_workbook(data: Dict[str, Any]) -> io.BytesIO:
         2,
         "D13",
         "K13",
+    )
+
+    _write_tbs_summary_section(
+        ws,
+        tbs_summary,
+        start_row=32,
     )
 
     ws_detail = wb.create_sheet("Detail Prediksi")
@@ -918,8 +1513,20 @@ def build_user_report_workbook(data: Dict[str, Any]) -> io.BytesIO:
     ws_daily.column_dimensions["H"].width = 28
     ws_daily.sheet_view.zoomScale = 90
 
-    # Laporan pengguna cukup tiga sheet: Ringkasan, Detail Prediksi,
-    # dan Rekap Harian. Tren Harian sengaja tidak dibuat.
+    _add_tbs_detail_sheet(
+        wb,
+        detections,
+        period_label,
+        user_name=user["name"],
+    )
+    _add_tbs_daily_recap_sheet(
+        wb,
+        detections,
+        period_label,
+        user_name=user["name"],
+    )
+
+    # Tren Harian image-level sengaja tetap tidak dibuat pada laporan user.
 
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -933,7 +1540,9 @@ def build_admin_report_workbook(data: Dict[str, Any]) -> io.BytesIO:
     ws.title = "Dashboard"
 
     records = data["records"]
+    detections = data.get("detections", [])
     summary = _calculate_summary(records)
+    tbs_summary = _calculate_tbs_summary(detections, len(records))
     period_label = build_period_label(data["start_date"], data["end_date"])
 
     _style_title(
@@ -1019,6 +1628,12 @@ def build_admin_report_workbook(data: Dict[str, Any]) -> io.BytesIO:
         2,
         "D13",
         "K13",
+    )
+
+    _write_tbs_summary_section(
+        ws,
+        tbs_summary,
+        start_row=32,
     )
 
     # Rekap per user
@@ -1281,6 +1896,18 @@ def build_admin_report_workbook(data: Dict[str, Any]) -> io.BytesIO:
 
     # Tambahkan visualisasi tren harian ke laporan admin juga.
     _add_daily_trend_sheet(wb, records)
+
+    _add_tbs_detail_sheet(
+        wb,
+        detections,
+        period_label,
+        include_user=True,
+    )
+    _add_tbs_daily_recap_sheet(
+        wb,
+        detections,
+        period_label,
+    )
 
     buffer = io.BytesIO()
     wb.save(buffer)

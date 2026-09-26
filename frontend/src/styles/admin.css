@@ -163,6 +163,14 @@
   grid-template-columns: repeat(3, 1fr);
 }
 
+.admin-stat-grid.admin-overview-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.admin-stat-grid.admin-prediction-summary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .admin-stat-grid article {
   padding: 17px;
   display: flex;
@@ -231,6 +239,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 14px;
 }
 
 .admin-panel-title h3 {
@@ -272,6 +281,66 @@
 .admin-class-value small {
   color: #7d877e;
   font-size: 9px;
+}
+
+.admin-detector-metric {
+  flex-shrink: 0;
+  padding: 9px 11px;
+  display: grid;
+  gap: 2px;
+  border-radius: 13px;
+  text-align: right;
+  background: #eef5ec;
+}
+
+.admin-detector-metric small {
+  color: #6f7d70;
+  font-size: 9px;
+}
+
+.admin-detector-metric strong {
+  color: #356c3a;
+  font-size: 17px;
+}
+
+.admin-coverage-note {
+  margin-top: 12px;
+  padding: 11px 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid #cce3cd;
+  border-radius: 14px;
+  color: #356c3a;
+  background: #eff8ef;
+}
+
+.admin-coverage-note > span {
+  flex-shrink: 0;
+  font-weight: 900;
+}
+
+.admin-coverage-note > div {
+  display: grid;
+  gap: 3px;
+}
+
+.admin-coverage-note strong {
+  font-size: 12px;
+}
+
+.admin-coverage-note small {
+  color: inherit;
+  font-size: 10px;
+  line-height: 1.45;
+  opacity: 0.84;
+}
+
+.admin-coverage-note.partial,
+.admin-coverage-note.unavailable {
+  border-color: #ead6a9;
+  color: #6f4b13;
+  background: #fff6dc;
 }
 
 .admin-user-summary {
@@ -685,6 +754,11 @@
     grid-template-columns: repeat(2, 1fr);
   }
 
+  .admin-stat-grid.admin-overview-grid,
+  .admin-stat-grid.admin-prediction-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .admin-stat-grid.three {
     grid-template-columns: repeat(3, 1fr);
   }
@@ -719,8 +793,20 @@
   }
 
   .admin-stat-grid,
-  .admin-stat-grid.three {
+  .admin-stat-grid.three,
+  .admin-stat-grid.admin-overview-grid,
+  .admin-stat-grid.admin-prediction-summary {
     grid-template-columns: 1fr;
+  }
+
+  .admin-panel-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-detector-metric {
+    width: 100%;
+    text-align: left;
   }
 
   .admin-section-heading {

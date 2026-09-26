@@ -1,13 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { predictPalmImage } from "../services/api";
+import {
+  predictPalmImage,
+  reverseGeocodeLocation,
+  updatePredictionLocationLabel,
+} from "../services/api";
 
 const MAX_ZOOM = 5;
 const MIN_ZOOM = 1;
 const ZOOM_STEP = 0.2;
+const GEOLOCATION_OPTIONS = {
+  enableHighAccuracy: true,
+  timeout: 10000,
+  maximumAge: 60000,
+};
+
+const LOCATION_STATUS_TEXT = {
+  requesting: "Meminta izin lokasi...",
+  resolving: "Lokasi GPS ditemukan. Mencari nama wilayah...",
+  available: "✓ Lokasi ditemukan dan akan disimpan otomatis.",
+  denied: "Izin lokasi ditolak. Prediksi tetap dilanjutkan tanpa lokasi.",
+  timeout: "Lokasi tidak merespons. Prediksi tetap dilanjutkan.",
+  unavailable: "Lokasi tidak tersedia. Prediksi tetap dilanjutkan.",
+  unsupported: "Browser ini tidak mendukung geolocation.",
+};
 
 const CLASS_INFO = {
   belum_masak: {
-    label: "Belum Matang",
+    label: "Belum Masak",
     icon: "🟢",
     status: "Belum siap dipanen",
     description:
@@ -43,6 +62,78 @@ function normalizeClassName(value = "") {
   return String(value).trim().toLowerCase().replace(/\s+/g, "_");
 }
 
+function formatClassLabel(value) {
+  const normalized = normalizeClassName(value);
+
+  if (CLASS_INFO[normalized]) {
+    return CLASS_INFO[normalized].label;
+  }
+
+  return normalized
+    .split("_")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ") || "Tidak diketahui";
+}
+
+function toSafeCount(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0
+    ? Math.trunc(number)
+    : fallback;
+}
+
+function getValidCoordinate(value, minimum, maximum) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const coordinate = Number(value);
+  return Number.isFinite(coordinate) &&
+    coordinate >= minimum &&
+    coordinate <= maximum
+    ? coordinate
+    : null;
+}
+
+function getLocationAccuracyQuality(value) {
+  const accuracy = Number(value);
+  const isAvailable =
+    value !== null &&
+    value !== undefined &&
+    value !== "" &&
+    Number.isFinite(accuracy) &&
+    accuracy >= 0;
+
+  if (!isAvailable) {
+    return null;
+  }
+
+  if (accuracy <= 50) {
+    return { accuracy, label: "Akurasi Tinggi", level: "high" };
+  }
+
+  if (accuracy <= 500) {
+    return { accuracy, label: "Akurasi Sedang", level: "medium" };
+  }
+
+  return { accuracy, label: "Akurasi Rendah", level: "low" };
+}
+
+function formatWarning(warning) {
+  if (typeof warning === "string") {
+    return warning;
+  }
+
+  const detectionNumber = Number.isInteger(warning?.detection_index)
+    ? `Kandidat TBS ${warning.detection_index + 1}: `
+    : "";
+  const reason = String(warning?.reason || "Sebagian hasil tidak dapat diproses")
+    .replaceAll("_", " ");
+
+  return `${detectionNumber}${reason}`;
+}
+
 function dataUrlToFile(dataUrl, filename) {
   const [header, content] = dataUrl.split(",");
   const mimeType = header.match(/data:(.*?);base64/)?.[1] || "image/jpeg";
@@ -59,11 +150,54 @@ function dataUrlToFile(dataUrl, filename) {
   });
 }
 
+function captureOptionalLocation() {
+  return new Promise((resolve) => {
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.geolocation?.getCurrentPosition
+    ) {
+      resolve({ location: null, status: "unsupported" });
+      return;
+    }
+
+    try {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          resolve({
+            location: {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              accuracy: position.coords.accuracy,
+              capturedAt: new Date().toISOString(),
+            },
+            status: "available",
+          });
+        },
+        (locationError) => {
+          let status = "unavailable";
+
+          if (locationError?.code === 1) {
+            status = "denied";
+          } else if (locationError?.code === 3) {
+            status = "timeout";
+          }
+
+          resolve({ location: null, status });
+        },
+        GEOLOCATION_OPTIONS,
+      );
+    } catch {
+      resolve({ location: null, status: "unavailable" });
+    }
+  });
+}
+
 function PredictionPage({ onOpenHistory }) {
   const galleryRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const cameraStreamRef = useRef(null);
+  const resultLocationSaveRef = useRef(false);
 
   const [mode, setMode] = useState("camera");
   const [cameraActive, setCameraActive] = useState(false);
@@ -78,25 +212,147 @@ function PredictionPage({ onOpenHistory }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [isPreparingLocation, setIsPreparingLocation] = useState(false);
+  const [locationStatus, setLocationStatus] = useState("idle");
+  const [isEditingResultLocation, setIsEditingResultLocation] = useState(false);
+  const [resultLocationDraft, setResultLocationDraft] = useState("");
+  const [isSavingResultLocation, setIsSavingResultLocation] = useState(false);
+  const [resultLocationEditError, setResultLocationEditError] = useState("");
+  const [resultImageErrors, setResultImageErrors] = useState({});
+  const [loadedResultImages, setLoadedResultImages] = useState({});
+  const isBusy =
+    loading || isPreparingLocation || isSavingResultLocation;
+
+  const resultPayload = useMemo(() => {
+    if (result?.result && typeof result.result === "object") {
+      return result.result;
+    }
+
+    return result;
+  }, [result]);
 
   const resultClass = useMemo(() => {
     const value =
-      result?.predicted_class ||
-      result?.prediction ||
-      result?.result?.predicted_class ||
+      resultPayload?.predicted_class ||
+      resultPayload?.prediction ||
       "";
 
     return normalizeClassName(value);
-  }, [result]);
+  }, [resultPayload]);
 
   const confidence = toPercent(
-    result?.confidence ||
-      result?.confidence_score ||
-      result?.result?.confidence,
+    resultPayload?.confidence ?? resultPayload?.confidence_score,
   );
 
-  const probabilities =
-    result?.probabilities || result?.result?.probabilities || {};
+  const probabilities = resultPayload?.probabilities || {};
+
+  const detections = useMemo(
+    () =>
+      Array.isArray(resultPayload?.detections)
+        ? resultPayload.detections
+        : [],
+    [resultPayload],
+  );
+  const warnings = Array.isArray(resultPayload?.warnings)
+    ? resultPayload.warnings
+    : [];
+  const hasDetectionContract = Boolean(
+    resultPayload?.summary || Array.isArray(resultPayload?.detections),
+  );
+
+  const detectionSummary = useMemo(() => {
+    const fallbackByClass = detections.reduce(
+      (counts, detection) => {
+        const className = normalizeClassName(detection?.predicted_class);
+
+        if (Object.hasOwn(counts, className)) {
+          counts[className] += 1;
+        }
+
+        return counts;
+      },
+      {
+        belum_masak: 0,
+        masak: 0,
+        terlalu_masak: 0,
+      },
+    );
+    const backendSummary = resultPayload?.summary;
+
+    return {
+      total: toSafeCount(
+        backendSummary?.total_detections,
+        detections.length,
+      ),
+      byClass: {
+        belum_masak: toSafeCount(
+          backendSummary?.by_class?.belum_masak,
+          fallbackByClass.belum_masak,
+        ),
+        masak: toSafeCount(
+          backendSummary?.by_class?.masak,
+          fallbackByClass.masak,
+        ),
+        terlalu_masak: toSafeCount(
+          backendSummary?.by_class?.terlalu_masak,
+          fallbackByClass.terlalu_masak,
+        ),
+      },
+    };
+  }, [detections, resultPayload]);
+
+  const processedImageUrl =
+    resultPayload?.image_processed_url || result?.image_processed_url || "";
+  const resultImageCandidates = [processedImageUrl, preview].filter(
+    (url, index, values) =>
+      url && values.indexOf(url) === index && !resultImageErrors[url],
+  );
+  const resultImageSource = resultImageCandidates[0] || "";
+  const resultImageIsProcessed =
+    Boolean(processedImageUrl) && resultImageSource === processedImageUrl;
+  const resultImageLoading = Boolean(
+    resultImageSource && !loadedResultImages[resultImageSource],
+  );
+  const isZeroDetection =
+    hasDetectionContract && detectionSummary.total === 0;
+  const resultLocation = resultPayload?.location || null;
+  const resultLatitude = getValidCoordinate(
+    resultLocation?.latitude,
+    -90,
+    90,
+  );
+  const resultLongitude = getValidCoordinate(
+    resultLocation?.longitude,
+    -180,
+    180,
+  );
+  const hasResultLocation =
+    resultLocation?.available === true &&
+    resultLatitude !== null &&
+    resultLongitude !== null;
+  const resultLocationLabel = String(resultLocation?.label || "").trim();
+  const resultLocationAutoName = String(
+    resultLocation?.auto_name || "",
+  ).trim();
+  const resultLocationName =
+    resultLocationLabel ||
+    resultLocationAutoName ||
+    "Nama lokasi tidak tersedia";
+  const resultRecordId = resultPayload?.record_id || null;
+  const canUpdateResultLocation = Boolean(resultRecordId);
+  const showResultAutoName = Boolean(
+    resultLocationLabel &&
+      resultLocationAutoName &&
+      resultLocationAutoName !== resultLocationLabel,
+  );
+  const resultAccuracyQuality = getLocationAccuracyQuality(
+    resultLocation?.accuracy_meters,
+  );
+  const resultLocationMapUrl = hasResultLocation
+    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+        `${resultLatitude},${resultLongitude}`,
+      )}`
+    : "";
 
   const info = CLASS_INFO[resultClass] || {
     label: resultClass || "Hasil Prediksi",
@@ -151,6 +407,17 @@ function PredictionPage({ onOpenHistory }) {
     );
   };
 
+  const resetLocationStatus = () => {
+    setLocationStatus("idle");
+  };
+
+  const resetResultLocationEditor = () => {
+    setIsEditingResultLocation(false);
+    setResultLocationDraft("");
+    setIsSavingResultLocation(false);
+    setResultLocationEditError("");
+  };
+
   const switchMode = (selectedMode) => {
     stopCamera();
     clearPreviewUrl();
@@ -162,6 +429,9 @@ function PredictionPage({ onOpenHistory }) {
     setResult(null);
     setError("");
     setLoading(false);
+    resetLocationStatus();
+    setResultImageErrors({});
+    setLoadedResultImages({});
     resetZoom();
 
     if (galleryRef.current) {
@@ -177,6 +447,7 @@ function PredictionPage({ onOpenHistory }) {
     setFile(null);
     setPreview("");
     setSource("camera");
+    resetLocationStatus();
     resetZoom();
 
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -287,6 +558,7 @@ function PredictionPage({ onOpenHistory }) {
     setSource("camera");
     setResult(null);
     setError("");
+    resetLocationStatus();
 
     stopCamera();
   };
@@ -298,6 +570,7 @@ function PredictionPage({ onOpenHistory }) {
     setPreview("");
     setResult(null);
     setError("");
+    resetLocationStatus();
     resetZoom();
 
     if (mode === "camera") {
@@ -332,6 +605,7 @@ function PredictionPage({ onOpenHistory }) {
     setSource("gallery");
     setResult(null);
     setError("");
+    resetLocationStatus();
     resetZoom();
   };
 
@@ -348,10 +622,33 @@ function PredictionPage({ onOpenHistory }) {
     setResult(null);
     setError("");
     setLoading(false);
+    setIsPreparingLocation(false);
+    resetLocationStatus();
+    resetResultLocationEditor();
     resetZoom();
 
     if (galleryRef.current) {
       galleryRef.current.value = "";
+    }
+  };
+
+  const submitPrediction = async (location = null) => {
+    resetResultLocationEditor();
+    setLoading(true);
+    setError("");
+    setResult(null);
+    setResultImageErrors({});
+    setLoadedResultImages({});
+
+    try {
+      const response = await predictPalmImage(file, source, location);
+      setResult(response);
+    } catch (requestError) {
+      setError(
+        requestError.message || "Klasifikasi gagal. Silakan coba kembali.",
+      );
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -361,19 +658,119 @@ function PredictionPage({ onOpenHistory }) {
       return;
     }
 
-    setLoading(true);
+    setIsPreparingLocation(true);
     setError("");
     setResult(null);
+    setLocationStatus("requesting");
+
+    let predictionLocation = null;
 
     try {
-      const response = await predictPalmImage(file, source);
-      setResult(response);
+      const locationResult = await captureOptionalLocation();
+      setLocationStatus(locationResult.status);
+
+      if (locationResult.location) {
+        let autoName = "";
+        setLocationStatus("resolving");
+
+        try {
+          const geocodingResult = await reverseGeocodeLocation(
+            locationResult.location.latitude,
+            locationResult.location.longitude,
+          );
+          if (geocodingResult?.success) {
+            autoName = String(
+              geocodingResult?.location?.auto_name || "",
+            ).trim();
+          }
+        } catch {
+          autoName = "";
+        }
+
+        predictionLocation = {
+          ...locationResult.location,
+          autoName,
+          label: autoName,
+        };
+        setLocationStatus("available");
+      }
+    } catch {
+      setLocationStatus("unavailable");
+    } finally {
+      setIsPreparingLocation(false);
+    }
+
+    await submitPrediction(predictionLocation);
+  };
+
+  const startEditingResultLocation = () => {
+    setResultLocationDraft(
+      resultLocationLabel || resultLocationAutoName || "",
+    );
+    setResultLocationEditError("");
+    setIsEditingResultLocation(true);
+  };
+
+  const cancelEditingResultLocation = () => {
+    if (resultLocationSaveRef.current) {
+      return;
+    }
+
+    setResultLocationDraft("");
+    setResultLocationEditError("");
+    setIsEditingResultLocation(false);
+  };
+
+  const saveResultLocation = async (event) => {
+    event.preventDefault();
+
+    if (!resultRecordId || resultLocationSaveRef.current) {
+      return;
+    }
+
+    resultLocationSaveRef.current = true;
+    setIsSavingResultLocation(true);
+    setResultLocationEditError("");
+
+    try {
+      const response = await updatePredictionLocationLabel(
+        resultRecordId,
+        resultLocationDraft,
+      );
+      const updatedLocation = response?.location || {};
+
+      const updateLocation = (payload) => ({
+        ...payload,
+        location: {
+          ...(payload?.location || {}),
+          auto_name: Object.hasOwn(updatedLocation, "auto_name")
+            ? updatedLocation.auto_name
+            : payload?.location?.auto_name ?? null,
+          label: Object.hasOwn(updatedLocation, "label")
+            ? updatedLocation.label
+            : payload?.location?.label ?? null,
+        },
+      });
+
+      setResult((current) => {
+        if (current?.result && typeof current.result === "object") {
+          return {
+            ...current,
+            result: updateLocation(current.result),
+          };
+        }
+
+        return updateLocation(current);
+      });
+      setResultLocationDraft("");
+      setIsEditingResultLocation(false);
     } catch (requestError) {
-      setError(
-        requestError.message || "Klasifikasi gagal. Silakan coba kembali.",
+      setResultLocationEditError(
+        requestError.message || "Nama lokasi gagal disimpan.",
       );
     } finally {
-      setLoading(false);
+      resultLocationSaveRef.current = false;
+      setIsSavingResultLocation(false);
     }
   };
 
@@ -400,7 +797,7 @@ function PredictionPage({ onOpenHistory }) {
           type="button"
           className={mode === "camera" ? "active" : ""}
           onClick={() => switchMode("camera")}
-          disabled={loading}
+          disabled={isBusy}
         >
           Kamera
         </button>
@@ -409,7 +806,7 @@ function PredictionPage({ onOpenHistory }) {
           type="button"
           className={mode === "gallery" ? "active" : ""}
           onClick={() => switchMode("gallery")}
-          disabled={loading}
+          disabled={isBusy}
         >
           Galeri
         </button>
@@ -518,7 +915,7 @@ function PredictionPage({ onOpenHistory }) {
                 type="button"
                 className="prediction-v2-secondary-btn"
                 onClick={retakePhoto}
-                disabled={loading}
+                disabled={isBusy}
               >
                 Foto Ulang
               </button>
@@ -527,7 +924,7 @@ function PredictionPage({ onOpenHistory }) {
                 type="button"
                 className="prediction-v2-secondary-btn"
                 onClick={openCamera}
-                disabled={loading || isOpeningCamera}
+                disabled={isBusy || isOpeningCamera}
               >
                 {isOpeningCamera ? "Membuka..." : "Buka Kamera"}
               </button>
@@ -536,7 +933,7 @@ function PredictionPage({ onOpenHistory }) {
                 type="button"
                 className="prediction-v2-danger-btn"
                 onClick={stopCamera}
-                disabled={loading}
+                disabled={isBusy}
               >
                 Tutup Kamera
               </button>
@@ -547,7 +944,7 @@ function PredictionPage({ onOpenHistory }) {
                 type="button"
                 className="prediction-v2-primary-btn"
                 onClick={capturePhoto}
-                disabled={!cameraActive || loading}
+                disabled={!cameraActive || isBusy}
               >
                 Ambil Gambar
               </button>
@@ -556,9 +953,13 @@ function PredictionPage({ onOpenHistory }) {
                 type="button"
                 className="prediction-v2-primary-btn"
                 onClick={runPrediction}
-                disabled={loading}
+                disabled={isBusy}
               >
-                {loading ? "Menganalisis..." : "Prediksi"}
+                {loading
+                  ? "Menganalisis..."
+                  : isPreparingLocation
+                    ? "Menyiapkan lokasi..."
+                    : "Mulai Prediksi"}
               </button>
             )}
           </div>
@@ -568,7 +969,7 @@ function PredictionPage({ onOpenHistory }) {
               type="button"
               className="prediction-v2-secondary-btn"
               onClick={resetInput}
-              disabled={loading}
+              disabled={isBusy}
             >
               Reset
             </button>
@@ -577,7 +978,7 @@ function PredictionPage({ onOpenHistory }) {
               type="button"
               className="prediction-v2-primary-btn"
               onClick={openGallery}
-              disabled={loading}
+              disabled={isBusy}
             >
               {preview ? "Ganti Foto" : "Pilih Foto"}
             </button>
@@ -589,7 +990,7 @@ function PredictionPage({ onOpenHistory }) {
             type="button"
             className="prediction-v2-secondary-btn prediction-v2-full"
             onClick={resetInput}
-            disabled={loading}
+            disabled={isBusy}
           >
             Reset
           </button>
@@ -600,9 +1001,13 @@ function PredictionPage({ onOpenHistory }) {
             type="button"
             className="prediction-v2-primary-btn prediction-v2-full"
             onClick={runPrediction}
-            disabled={loading}
+            disabled={isBusy}
           >
-            {loading ? "Menganalisis..." : "Prediksi Sekarang"}
+            {loading
+              ? "Menganalisis..."
+              : isPreparingLocation
+                ? "Menyiapkan lokasi..."
+                : "Mulai Prediksi"}
           </button>
         )}
 
@@ -623,6 +1028,24 @@ function PredictionPage({ onOpenHistory }) {
           </div>
         )}
 
+        <div className="prediction-v2-location-note" role="note">
+          <span aria-hidden="true">📍</span>
+          <div>
+            <b className="prediction-v2-location-title">
+              Lokasi Pengambilan
+            </b>
+            <p>
+              Lokasi akan disimpan otomatis jika tersedia. Browser akan
+              meminta izin saat prediksi dimulai.
+            </p>
+            {locationStatus !== "idle" && (
+              <small className={`is-${locationStatus}`} role="status">
+                {LOCATION_STATUS_TEXT[locationStatus]}
+              </small>
+            )}
+          </div>
+        </div>
+
         {error && <div className="prediction-v2-error">⚠️ {error}</div>}
       </section>
 
@@ -638,70 +1061,421 @@ function PredictionPage({ onOpenHistory }) {
         <section
           className={`prediction-v2-result-card prediction-v2-result-${resultClass}`}
         >
-          <div className="prediction-v2-result-top">
-            <div className="prediction-v2-result-icon">{info.icon}</div>
+          <div className="prediction-v2-section-heading">
+            <p className="prediction-v2-result-label">Hasil Analisis</p>
+            <h2>Gambar Hasil Deteksi</h2>
+          </div>
 
-            <div>
-              <p className="prediction-v2-result-label">Hasil Prediksi</p>
-              <h2>{info.label}</h2>
+          <figure className="prediction-v2-result-figure">
+            {resultImageSource ? (
+              <div
+                className={`prediction-v2-result-image-wrap${
+                  resultImageLoading ? " is-loading" : ""
+                }`}
+              >
+                {resultImageLoading && (
+                  <div className="prediction-v2-image-loading" role="status">
+                    <div className="prediction-v2-spinner" />
+                    <span>Memuat gambar hasil...</span>
+                  </div>
+                )}
+
+                <img
+                  src={resultImageSource}
+                  alt={
+                    resultImageIsProcessed
+                      ? "Hasil deteksi TBS dengan bounding box dan label kematangan"
+                      : "Gambar TBS yang dianalisis"
+                  }
+                  className="prediction-v2-result-image"
+                  onLoad={() =>
+                    setLoadedResultImages((current) => ({
+                      ...current,
+                      [resultImageSource]: true,
+                    }))
+                  }
+                  onError={() =>
+                    setResultImageErrors((current) => ({
+                      ...current,
+                      [resultImageSource]: true,
+                    }))
+                  }
+                />
+              </div>
+            ) : (
+              <div className="prediction-v2-result-image-empty">
+                Gambar hasil tidak dapat ditampilkan.
+              </div>
+            )}
+
+            <figcaption>
+              {resultImageIsProcessed
+                ? "Bounding box dan label kematangan dibuat oleh sistem analisis."
+                : "Gambar anotasi tidak tersedia; menampilkan gambar asli sebagai fallback."}
+            </figcaption>
+          </figure>
+
+          {hasDetectionContract && (
+            <section
+              className="prediction-v2-detection-summary"
+              aria-labelledby="detection-summary-title"
+            >
+              <div className="prediction-v2-section-heading">
+                <p className="prediction-v2-result-label">Ringkasan Deteksi</p>
+                <h2 id="detection-summary-title">TBS pada Gambar</h2>
+              </div>
+
+              <div className="prediction-v2-total-detections">
+                <span>Total TBS terdeteksi</span>
+                <b>{detectionSummary.total}</b>
+              </div>
+
+              <div className="prediction-v2-count-grid">
+                {Object.entries(CLASS_INFO).map(([key, classInfo]) => (
+                  <div
+                    className={`prediction-v2-count-card prediction-v2-count-${key}`}
+                    key={key}
+                  >
+                    <span>{classInfo.label}</span>
+                    <b>{detectionSummary.byClass[key]}</b>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {isZeroDetection ? (
+            <div className="prediction-v2-zero-state" role="status">
+              <h2>Tidak ada TBS yang terdeteksi pada gambar.</h2>
+              <p>
+                Ambil gambar lebih dekat, pastikan TBS terlihat jelas, dan
+                gunakan pencahayaan yang lebih baik sebelum mencoba kembali.
+              </p>
             </div>
-          </div>
+          ) : (
+            <section
+              className="prediction-v2-image-summary"
+              aria-labelledby="image-summary-title"
+            >
+              <div className="prediction-v2-result-top">
+                <div className="prediction-v2-result-icon">{info.icon}</div>
 
-          <div className="prediction-v2-status-pill">{info.status}</div>
+                <div>
+                  <p className="prediction-v2-result-label">
+                    Ringkasan Kematangan Gambar
+                  </p>
+                  <h2 id="image-summary-title">{info.label}</h2>
+                </div>
+              </div>
 
-          <div className="prediction-v2-confidence-box">
-            <span>Confidence</span>
-            <b>{confidence.toFixed(2)}%</b>
-            <small>Tingkat keyakinan model terhadap hasil klasifikasi.</small>
-          </div>
+              <div className="prediction-v2-status-pill">{info.status}</div>
+
+              <div className="prediction-v2-confidence-box">
+                <span>Keyakinan ringkasan kematangan</span>
+                <b>{confidence.toFixed(2)}%</b>
+                <small>
+                  Rata-rata keyakinan kematangan untuk kelas mayoritas pada
+                  gambar.
+                </small>
+              </div>
+
+              <div className="prediction-v2-recommendation-box">
+                <b>Keterangan</b>
+                <p>{info.description}</p>
+              </div>
+
+              <div className="prediction-v2-recommendation-box">
+                <b>Saran</b>
+                <p>{info.recommendation}</p>
+              </div>
+
+              <div className="prediction-v2-prob-list">
+                {Object.entries(CLASS_INFO).map(([key, classInfo]) => {
+                  const percent = toPercent(probabilities[key]);
+
+                  return (
+                    <div className="prediction-v2-prob-bar-item" key={key}>
+                      <div className="prediction-v2-prob-bar-top">
+                        <span>
+                          {classInfo.icon} {classInfo.label}
+                        </span>
+                        <b>{percent.toFixed(2)}%</b>
+                      </div>
+
+                      <div className="prediction-v2-prob-track">
+                        <div
+                          className="prediction-v2-prob-fill"
+                          style={{
+                            width: `${Math.min(Math.max(percent, 0), 100)}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          <section
+            className="prediction-v2-result-location"
+            aria-labelledby="prediction-location-result-title"
+          >
+            <div className="prediction-v2-section-heading">
+              <p className="prediction-v2-result-label">Metadata Lokasi</p>
+              <h2 id="prediction-location-result-title">
+                Lokasi Pengambilan
+              </h2>
+            </div>
+
+            {isEditingResultLocation ? (
+              <form
+                className="prediction-v2-result-location-editor"
+                onSubmit={saveResultLocation}
+              >
+                <label htmlFor="prediction-result-location-label">
+                  Nama Lokasi
+                </label>
+                <input
+                  id="prediction-result-location-label"
+                  type="text"
+                  maxLength={500}
+                  value={resultLocationDraft}
+                  onChange={(event) =>
+                    setResultLocationDraft(event.target.value)
+                  }
+                  placeholder="Contoh: Blok 3 Afdeling Selatan"
+                  disabled={isSavingResultLocation}
+                  autoFocus
+                />
+                <p>
+                  Nama lokasi dapat disesuaikan dengan nama kebun, blok,
+                  afdeling, atau penyebutan lokasi di lapangan. Mengubah nama
+                  tidak mengubah titik koordinat.
+                </p>
+                {!hasResultLocation && (
+                  <p className="prediction-v2-result-location-manual-note">
+                    Nama manual ini tidak memiliki koordinat GPS.
+                  </p>
+                )}
+                {resultLocationEditError && (
+                  <p
+                    className="prediction-v2-result-location-edit-error"
+                    role="alert"
+                  >
+                    {resultLocationEditError}
+                  </p>
+                )}
+                <div>
+                  <button
+                    type="submit"
+                    disabled={isSavingResultLocation}
+                  >
+                    {isSavingResultLocation ? "Menyimpan..." : "Simpan"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelEditingResultLocation}
+                    disabled={isSavingResultLocation}
+                  >
+                    Batal
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="prediction-v2-result-location-name-row">
+                <div className="prediction-v2-result-location-name">
+                  <span aria-hidden="true">📍</span>
+                  <div>
+                    <small>Lokasi</small>
+                    <strong>{resultLocationName}</strong>
+                  </div>
+                </div>
+
+                {canUpdateResultLocation && (
+                  <button
+                    type="button"
+                    className="prediction-v2-result-location-edit-button"
+                    onClick={startEditingResultLocation}
+                  >
+                    {resultLocationLabel || resultLocationAutoName
+                      ? "Edit Nama Lokasi"
+                      : "Tambah Nama Lokasi"}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {hasResultLocation ? (
+              <>
+                <div className="prediction-v2-result-location-grid">
+                  {showResultAutoName && (
+                    <div className="is-auto-name">
+                      <small>Perkiraan wilayah</small>
+                      <strong>{resultLocationAutoName}</strong>
+                    </div>
+                  )}
+                  <div>
+                    <small>Koordinat</small>
+                    <strong>
+                      {resultLatitude.toFixed(6)}, {resultLongitude.toFixed(6)}
+                    </strong>
+                  </div>
+                  <div>
+                    <small>Akurasi</small>
+                    <strong>
+                      {resultAccuracyQuality
+                        ? `±${resultAccuracyQuality.accuracy.toFixed(1)} m`
+                        : "Tidak tersedia"}
+                    </strong>
+                    {resultAccuracyQuality && (
+                      <span
+                        className={`prediction-v2-location-quality is-${resultAccuracyQuality.level}`}
+                      >
+                        {resultAccuracyQuality.label}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {resultAccuracyQuality?.level === "low" && (
+                  <p className="prediction-v2-location-precision-note">
+                    Posisi perangkat kurang presisi. Periksa titik pada peta.
+                  </p>
+                )}
+
+                <a
+                  className="prediction-v2-location-map-link"
+                  href={resultLocationMapUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Lihat di Peta
+                  <span aria-hidden="true">↗</span>
+                </a>
+              </>
+            ) : (
+              <p className="prediction-v2-result-location-empty">
+                Lokasi GPS tidak tersedia.
+              </p>
+            )}
+          </section>
 
           <div className="prediction-v2-scan-meta">
             <span>📅 {new Date().toLocaleDateString("id-ID")}</span>
             <span>📷 {source === "camera" ? "Kamera" : "Galeri"}</span>
           </div>
 
-          <div className="prediction-v2-recommendation-box">
-            <b>Keterangan</b>
-            <p>{info.description}</p>
-          </div>
+          {detections.length > 0 && (
+            <section
+              className="prediction-v2-detection-details"
+              aria-labelledby="detection-details-title"
+            >
+              <div className="prediction-v2-section-heading">
+                <p className="prediction-v2-result-label">Detail Per Objek</p>
+                <h2 id="detection-details-title">Hasil Setiap TBS</h2>
+              </div>
 
-          <div className="prediction-v2-recommendation-box">
-            <b>Saran</b>
-            <p>{info.recommendation}</p>
-          </div>
+              <div className="prediction-v2-detection-grid">
+                {detections.map((detection, index) => {
+                  const detectionClass = normalizeClassName(
+                    detection?.predicted_class,
+                  );
+                  const maturityConfidence = toPercent(
+                    detection?.maturity_confidence,
+                  );
+                  const detectorConfidence = toPercent(
+                    detection?.detector_confidence,
+                  );
+                  const detectionProbabilities = detection?.probabilities;
+                  const bbox = Array.isArray(detection?.bbox)
+                    ? detection.bbox
+                    : null;
 
-          <div className="prediction-v2-prob-list">
-            {Object.entries(CLASS_INFO).map(([key, classInfo]) => {
-              const percent = toPercent(probabilities[key]);
+                  return (
+                    <article
+                      className={`prediction-v2-detection-card prediction-v2-detection-${detectionClass}`}
+                      key={`${bbox?.join("-") || "tbs"}-${index}`}
+                    >
+                      <div className="prediction-v2-detection-card-head">
+                        <h3>TBS {index + 1}</h3>
+                        <span>{formatClassLabel(detectionClass)}</span>
+                      </div>
 
-              return (
-                <div className="prediction-v2-prob-bar-item" key={key}>
-                  <div className="prediction-v2-prob-bar-top">
-                    <span>
-                      {classInfo.icon} {classInfo.label}
-                    </span>
-                    <b>{percent.toFixed(2)}%</b>
-                  </div>
+                      <dl className="prediction-v2-detection-metrics">
+                        <div>
+                          <dt>Keyakinan Kematangan</dt>
+                          <dd>{maturityConfidence.toFixed(2)}%</dd>
+                        </div>
+                        <div>
+                          <dt>Keyakinan Deteksi</dt>
+                          <dd>{detectorConfidence.toFixed(2)}%</dd>
+                        </div>
+                      </dl>
 
-                  <div className="prediction-v2-prob-track">
-                    <div
-                      className="prediction-v2-prob-fill"
-                      style={{
-                        width: `${Math.min(Math.max(percent, 0), 100)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                      {detectionProbabilities &&
+                        typeof detectionProbabilities === "object" && (
+                          <div className="prediction-v2-detection-probs">
+                            {Object.entries(CLASS_INFO).map(
+                              ([key, classInfo]) => (
+                                <div key={key}>
+                                  <span>{classInfo.label}</span>
+                                  <b>
+                                    {toPercent(
+                                      detectionProbabilities[key],
+                                    ).toFixed(2)}
+                                    %
+                                  </b>
+                                </div>
+                              ),
+                            )}
+                          </div>
+                        )}
+
+                      {bbox && (
+                        <details className="prediction-v2-bbox-details">
+                          <summary>Koordinat bounding box</summary>
+                          <code>[{bbox.join(", ")}]</code>
+                        </details>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {warnings.length > 0 && (
+            <aside className="prediction-v2-warning-box" role="status">
+              <b>Catatan pemrosesan</b>
+              <ul>
+                {warnings.map((warning, index) => (
+                  <li key={`${formatWarning(warning)}-${index}`}>
+                    {formatWarning(warning)}
+                  </li>
+                ))}
+              </ul>
+              <small>
+                Prediksi tetap berhasil; catatan ini hanya berlaku untuk
+                kandidat yang tidak dapat diproses sepenuhnya.
+              </small>
+            </aside>
+          )}
 
           <div className="prediction-v2-result-actions">
-            <button type="button" onClick={resetInput}>
+            <button
+              type="button"
+              onClick={resetInput}
+              disabled={isSavingResultLocation}
+            >
               Periksa gambar lain
             </button>
 
-            <button type="button" onClick={onOpenHistory}>
+            <button
+              type="button"
+              onClick={onOpenHistory}
+              disabled={isSavingResultLocation}
+            >
               Lihat riwayat
             </button>
           </div>

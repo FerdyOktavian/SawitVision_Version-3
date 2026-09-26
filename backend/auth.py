@@ -1,4 +1,3 @@
-import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -8,16 +7,30 @@ from jose import JWTError, jwt
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from config_utils import env_choice, env_int, env_text
 from database import get_db
 
 load_dotenv()
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))
+JWT_SECRET_KEY = str(env_text("JWT_SECRET_KEY", required=True))
+JWT_ALGORITHM = env_choice(
+    "JWT_ALGORITHM",
+    "HS256",
+    {"hs256", "hs384", "hs512"},
+).upper()
+JWT_EXPIRE_MINUTES = env_int(
+    "JWT_EXPIRE_MINUTES", 10080, minimum=1, maximum=525600
+)
+APP_ENV = env_choice(
+    "APP_ENV",
+    "development",
+    {"development", "staging", "production", "test"},
+)
 
-if not JWT_SECRET_KEY:
-    raise ValueError("JWT_SECRET_KEY belum diset di file .env")
+if APP_ENV == "production" and len(JWT_SECRET_KEY) < 32:
+    raise ValueError(
+        "JWT_SECRET_KEY production harus memiliki minimal 32 karakter."
+    )
 
 bearer_scheme = HTTPBearer()
 

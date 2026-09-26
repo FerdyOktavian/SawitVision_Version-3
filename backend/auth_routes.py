@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from activity_log import log_activity
 from auth import create_access_token, get_current_user
 from database import get_db
+from security import enforce_rate_limit, require_staging_identity_auth
 from storage_supabase import (
     delete_storage_paths_from_supabase,
     extract_supabase_storage_path,
@@ -205,6 +206,7 @@ def safe_log_activity(
 def register_user(
     payload: RegisterRequest,
     request: Request,
+    _auth_policy: None = Depends(require_staging_identity_auth),
     db: Session = Depends(get_db),
 ):
     """
@@ -212,6 +214,12 @@ def register_user(
 
     Nomor telepon wajib unik. Nama boleh sama dengan pengguna lain.
     """
+    enforce_rate_limit(
+        request,
+        "auth_register",
+        limit=5,
+        window_seconds=3600,
+    )
     existing_user = get_user_by_phone(db, payload.phone_number)
 
     if existing_user:
@@ -296,6 +304,7 @@ def register_user(
 def login_user(
     payload: LoginRequest,
     request: Request,
+    _auth_policy: None = Depends(require_staging_identity_auth),
     db: Session = Depends(get_db),
 ):
     """
@@ -304,6 +313,12 @@ def login_user(
     Nomor telepon menjadi identitas unik akun, sedangkan nama digunakan
     sebagai pemeriksaan tambahan sesuai rancangan SawitVision V3.
     """
+    enforce_rate_limit(
+        request,
+        "auth_login",
+        limit=10,
+        window_seconds=60,
+    )
     user = get_user_by_phone(db, payload.phone_number)
 
     name_matches = (
@@ -611,8 +626,16 @@ class FindAccountRequest(BaseModel):
 @router.post("/find-account")
 def find_account(
     payload: FindAccountRequest,
+    request: Request,
+    _auth_policy: None = Depends(require_staging_identity_auth),
     db: Session = Depends(get_db),
 ):
+    enforce_rate_limit(
+        request,
+        "auth_find_account",
+        limit=10,
+        window_seconds=60,
+    )
     phone = payload.phone.strip()
 
     row = db.execute(

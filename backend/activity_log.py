@@ -9,6 +9,7 @@ Jika jumlah log melebihi 500, log paling lama akan dihapus otomatis.
 """
 
 import json
+import logging
 from typing import Any, Optional
 
 from fastapi import Request
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 
 
 MAX_ACTIVITY_LOGS = 500
+logger = logging.getLogger(__name__)
 
 
 def get_client_ip(request: Optional[Request]) -> Optional[str]:
@@ -84,19 +86,16 @@ def trim_activity_logs(
             deleted_count = result.rowcount or 0
 
         if deleted_count > 0:
-            print(
-                f"Activity log cleanup: "
-                f"{deleted_count} log lama dihapus. "
-                f"Maksimal tersimpan {max_logs} log."
+            logger.info(
+                "activity_log_cleanup deleted_count=%d max_logs=%d",
+                deleted_count,
+                max_logs,
             )
 
         return deleted_count
 
-    except Exception as error:
-        print(
-            "Gagal membersihkan activity log lama: "
-            f"{error}"
-        )
+    except Exception:
+        logger.error("activity_log_cleanup_failed")
         return 0
 
 
@@ -170,10 +169,10 @@ def log_activity(
 
         return True
 
-    except Exception as error:
+    except Exception:
         db.rollback()
-        print(
-            f"Gagal menyimpan activity log "
-            f"[{action}]: {error}"
+        logger.error(
+            "activity_log_write_failed action=%s",
+            (action or "UNKNOWN").strip().upper()[:100],
         )
         return False

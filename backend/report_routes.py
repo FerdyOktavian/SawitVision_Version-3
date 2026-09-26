@@ -1,4 +1,5 @@
 from datetime import date, datetime
+import logging
 from typing import Optional
 from urllib.parse import quote
 
@@ -19,6 +20,7 @@ from report_service import (
 
 
 router = APIRouter(tags=["Reports"])
+logger = logging.getLogger(__name__)
 
 
 def validate_date_range(
@@ -74,12 +76,16 @@ def export_my_predictions_excel(
         )
         buffer = build_user_report_workbook(data)
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except Exception as error:
+        raise HTTPException(
+            status_code=404,
+            detail="Pengguna tidak ditemukan.",
+        ) from error
+    except Exception:
+        logger.exception("User Excel report generation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Gagal membuat laporan Excel pengguna: {error}",
-        ) from error
+            detail="Gagal membuat laporan Excel pengguna.",
+        ) from None
 
     safe_name = sanitize_filename(current_user.get("name") or "user")
     date_suffix = datetime.now().strftime("%Y-%m-%d")
@@ -131,11 +137,12 @@ def export_admin_predictions_excel(
             predicted_class=predicted_class,
         )
         buffer = build_admin_report_workbook(data)
-    except Exception as error:
+    except Exception:
+        logger.exception("Admin Excel report generation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Gagal membuat laporan Excel admin: {error}",
-        ) from error
+            detail="Gagal membuat laporan Excel admin.",
+        ) from None
 
     date_suffix = datetime.now().strftime("%Y-%m-%d")
     filename = f"Laporan_Global_SawitVision_{date_suffix}.xlsx"

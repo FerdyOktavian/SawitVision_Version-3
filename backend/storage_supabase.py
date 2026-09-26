@@ -6,6 +6,7 @@ memasukkan service role key ke frontend React atau repository GitHub.
 """
 
 import os
+import logging
 from datetime import datetime, timezone
 from functools import lru_cache
 from io import BytesIO
@@ -16,17 +17,15 @@ from dotenv import load_dotenv
 from PIL import Image, ImageOps
 from supabase import Client, create_client
 
+from config_utils import env_text
+
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv(
-    "SUPABASE_SERVICE_ROLE_KEY"
-)
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_BUCKET = os.getenv(
-    "SUPABASE_BUCKET",
-    "sawitvision-v3-images",
-)
+SUPABASE_URL = env_text("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = env_text("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_KEY = env_text("SUPABASE_KEY")
+SUPABASE_BUCKET = env_text("SUPABASE_BUCKET", "sawitvision-v3-images")
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -176,7 +175,7 @@ def upload_prediction_images(
                 SUPABASE_BUCKET
             ).remove([paths["processed_path"]])
         except Exception:
-            pass
+            logger.exception("storage_partial_upload_cleanup_failed")
         raise
 
     return {

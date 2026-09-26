@@ -15,19 +15,43 @@ berada di auth_routes.py, sedangkan pemeriksaan token berada di auth.py.
 """
 
 import io
+import logging
+import math
 import os
 import tempfile
+import time
+from datetime import datetime
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
+from fastapi.responses import JSONResponse
+from PIL import Image, ImageOps
+from pydantic import BaseModel, ConfigDict
+from starlette.concurrency import run_in_threadpool
 
 from activity_log import log_activity
 from admin_routes import router as admin_router
 from auth import get_current_user
 from auth_routes import router as auth_router
+from config_utils import (
+    cors_origins as configured_cors_origins,
+    env_bool,
+    env_float,
+    env_text,
+)
 from crud import (
+    save_prediction_detections,
     save_prediction_record,
+    update_prediction_location_label,
     update_prediction_images,
     get_prediction_records,
     get_prediction_record_by_id,
@@ -37,27 +61,235 @@ from crud import (
     get_estimated_storage_usage,
 )
 from database import SessionLocal
-from predict import load_class_names, load_sawit_model, predict_image
+from geocoding import (
+    MAX_LOCATION_NAME_LENGTH,
+    reverse_geocode,
+    validate_coordinates,
+)
+from predict import load_ai_pipeline, predict_image_with_pipeline
+from observability import configure_logging, request_observability_middleware
+from readiness import build_readiness
 from report_routes import router as report_router
+from security import IS_PRODUCTION, enforce_rate_limit
 from storage_supabase import (
+    SUPABASE_BUCKET,
+    SUPABASE_KEY,
+    SUPABASE_SERVICE_ROLE_KEY,
+    SUPABASE_URL,
     delete_prediction_images_from_supabase,
     upload_prediction_images,
 )
 
-APP_STORAGE_LIMIT_GB = float(
-    os.getenv("APP_STORAGE_LIMIT_GB", "1")
+APP_STORAGE_LIMIT_GB = env_float(
+    "APP_STORAGE_LIMIT_GB", 1, minimum=0.01
 )
 
 APP_STORAGE_LIMIT_BYTES = int(
     APP_STORAGE_LIMIT_GB * 1024 * 1024 * 1024
 )
 
-MIN_SAVE_CONFIDENCE = float(
-    os.getenv("MIN_SAVE_CONFIDENCE", "70")
+MIN_SAVE_CONFIDENCE = env_float(
+    "MIN_SAVE_CONFIDENCE", 70, minimum=0, maximum=100
 )
 MAX_UPLOAD_SIZE_MB = 5
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+class UpdateLocationLabelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    location_label: str | None
+
+
+def normalize_optional_location(
+    latitude_raw: str | None,
+    longitude_raw: str | None,
+    accuracy_raw: str | None,
+    captured_at_raw: str | None,
+) -> tuple[dict, list[dict[str, str]]]:
+    """Validate optional client location without blocking prediction."""
+    location = {
+        "latitude": None,
+        "longitude": None,
+        "location_accuracy": None,
+        "location_captured_at": None,
+    }
+    warnings = []
+
+    latitude_value = str(latitude_raw).strip() if latitude_raw is not None else ""
+    longitude_value = (
+        str(longitude_raw).strip()
+        if longitude_raw is not None
+        else ""
+    )
+    accuracy_value = str(accuracy_raw).strip() if accuracy_raw is not None else ""
+    captured_at_value = (
+        str(captured_at_raw).strip()
+        if captured_at_raw is not None
+        else ""
+    )
+
+    if not any(
+        (latitude_value, longitude_value, accuracy_value, captured_at_value)
+    ):
+        return location, warnings
+
+    if not latitude_value or not longitude_value:
+        warnings.append(
+            {
+                "stage": "location_metadata",
+                "reason": "koordinat_lokasi_tidak_lengkap_diabaikan",
+            }
+        )
+        return location, warnings
+
+    try:
+        latitude = float(latitude_value)
+        longitude = float(longitude_value)
+    except (TypeError, ValueError):
+        warnings.append(
+            {
+                "stage": "location_metadata",
+                "reason": "koordinat_lokasi_tidak_valid_diabaikan",
+            }
+        )
+        return location, warnings
+
+    if (
+        not math.isfinite(latitude)
+        or not math.isfinite(longitude)
+        or not -90 <= latitude <= 90
+        or not -180 <= longitude <= 180
+    ):
+        warnings.append(
+            {
+                "stage": "location_metadata",
+                "reason": "koordinat_lokasi_di_luar_batas_diabaikan",
+            }
+        )
+        return location, warnings
+
+    location["latitude"] = latitude
+    location["longitude"] = longitude
+
+    if accuracy_value:
+        try:
+            accuracy = float(accuracy_value)
+            if not math.isfinite(accuracy) or accuracy < 0:
+                raise ValueError
+            location["location_accuracy"] = accuracy
+        except (TypeError, ValueError):
+            warnings.append(
+                {
+                    "stage": "location_metadata",
+                    "reason": "akurasi_lokasi_tidak_valid_diabaikan",
+                }
+            )
+
+    if captured_at_value:
+        try:
+            captured_at = datetime.fromisoformat(
+                captured_at_value.replace("Z", "+00:00")
+            )
+            if captured_at.tzinfo is None:
+                raise ValueError
+            location["location_captured_at"] = captured_at
+        except ValueError:
+            warnings.append(
+                {
+                    "stage": "location_metadata",
+                    "reason": "waktu_capture_lokasi_tidak_valid_diabaikan",
+                }
+            )
+
+    return location, warnings
+
+
+def normalize_optional_location_name(
+    raw_value: str | None,
+    field_name: str,
+    warnings: list[dict[str, str]],
+) -> str | None:
+    """Normalize optional location text without blocking prediction."""
+    if raw_value is None:
+        return None
+
+    value = " ".join(str(raw_value).split())
+    if not value:
+        return None
+
+    if len(value) > MAX_LOCATION_NAME_LENGTH:
+        value = value[:MAX_LOCATION_NAME_LENGTH].rstrip()
+        warnings.append(
+            {
+                "stage": "location_metadata",
+                "reason": f"{field_name}_terlalu_panjang_dipotong",
+            }
+        )
+
+    return value or None
+
+
+def build_location_response(location: dict) -> dict:
+    available = (
+        location.get("latitude") is not None
+        and location.get("longitude") is not None
+    )
+    return {
+        "available": available,
+        "latitude": location.get("latitude") if available else None,
+        "longitude": location.get("longitude") if available else None,
+        "accuracy_meters": (
+            location.get("location_accuracy")
+            if available
+            else None
+        ),
+        "captured_at": (
+            location["location_captured_at"].isoformat()
+            if available and location.get("location_captured_at")
+            else None
+        ),
+        "auto_name": location.get("location_auto_name"),
+        "label": location.get("location_label"),
+    }
+
+
+SAFE_PIPELINE_WARNING_REASONS = {
+    "bbox_non_finite",
+    "bbox_invalid_after_clamp",
+    "crop_too_small",
+}
+
+
+def sanitize_pipeline_warnings(warnings: list[dict]) -> list[dict]:
+    """Keep warning metadata while removing internal exception details."""
+    sanitized = []
+    for warning in warnings:
+        stage = str(warning.get("stage") or "ai_pipeline")
+        raw_reason = str(warning.get("reason") or "")
+        if raw_reason in SAFE_PIPELINE_WARNING_REASONS:
+            safe_reason = raw_reason
+        else:
+            logger.warning("Internal AI pipeline warning: %r", warning)
+            safe_reason = f"{stage}_failed"
+
+        safe_warning = {
+            "stage": stage,
+            "reason": safe_reason,
+        }
+        if "detection_index" in warning:
+            safe_warning["detection_index"] = warning["detection_index"]
+        if "bbox" in warning:
+            safe_warning["bbox"] = warning["bbox"]
+        sanitized.append(safe_warning)
+    return sanitized
+
+logger = logging.getLogger(__name__)
+LOG_LEVEL = configure_logging()
+ENABLE_API_DOCS = env_bool("ENABLE_API_DOCS", not IS_PRODUCTION)
+APP_ENV = str(env_text("APP_ENV", "development"))
+GEOCODING_ENABLED = env_bool("GEOCODING_ENABLED", True)
 
 app = FastAPI(
     title="SawitVision V3 API",
@@ -66,15 +298,14 @@ app = FastAPI(
         "dengan autentikasi nama dan nomor telepon."
     ),
     version="3.0.0",
+    docs_url="/docs" if ENABLE_API_DOCS else None,
+    redoc_url="/redoc" if ENABLE_API_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_API_DOCS else None,
 )
 
 # Untuk production, isi CORS_ORIGINS dengan URL frontend, dipisahkan koma.
 # Contoh: CORS_ORIGINS=https://sawitvision.vercel.app,http://localhost:5173
-cors_origins = [
-    origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
-    if origin.strip()
-]
+cors_origins = configured_cors_origins()
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,12 +315,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault(
+        "Referrer-Policy",
+        "strict-origin-when-cross-origin",
+    )
+    return response
+
+
+app.middleware("http")(request_observability_middleware)
+
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(report_router)
 
-class_names = load_class_names()
-model = load_sawit_model()
+pipeline_load_started_at = time.perf_counter()
+ai_pipeline = load_ai_pipeline()
+pipeline_load_duration_ms = (
+    time.perf_counter() - pipeline_load_started_at
+) * 1000
+STORAGE_CONFIGURED = bool(
+    SUPABASE_URL
+    and (SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY)
+    and SUPABASE_BUCKET
+)
+logger.info(
+    "ai_pipeline_loaded device=%s yolo_loaded=true dino_loaded=true "
+    "duration_ms=%.2f",
+    ai_pipeline.device,
+    pipeline_load_duration_ms,
+)
+logger.info(
+    "startup_configuration app_env=%s storage_configured=%s "
+    "geocoding=%s api_docs=%s log_level=%s",
+    APP_ENV,
+    STORAGE_CONFIGURED,
+    "enabled" if GEOCODING_ENABLED else "disabled",
+    "enabled" if ENABLE_API_DOCS else "disabled",
+    LOG_LEVEL,
+)
+
+
+@app.on_event("startup")
+async def log_application_ready() -> None:
+    logger.info("application_ready service=sawitvision-backend")
 
 
 @app.get("/")
@@ -102,15 +376,141 @@ def root():
     }
 
 
+@app.get("/health")
+def health():
+    """Liveness only: no database, model, Storage, or geocoder work."""
+    return {
+        "status": "ok",
+        "service": "sawitvision-backend",
+        "version": "3.0.0",
+    }
+
+
+@app.get("/ready")
+def ready():
+    """Check required local AI state and lightweight DB connectivity."""
+    payload, status_code = build_readiness(
+        pipeline=ai_pipeline,
+        session_factory=SessionLocal,
+        storage_configured=STORAGE_CONFIGURED,
+        geocoding_enabled=GEOCODING_ENABLED,
+    )
+    return JSONResponse(content=payload, status_code=status_code)
+
+
+@app.get("/location/reverse-geocode")
+async def get_reverse_geocoded_location(
+    request: Request,
+    latitude: str = Query(...),
+    longitude: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    enforce_rate_limit(
+        request,
+        "reverse_geocode_user",
+        limit=30,
+        window_seconds=60,
+        identity=current_user["id"],
+    )
+    try:
+        latitude_value, longitude_value = validate_coordinates(
+            latitude, longitude
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail="Koordinat lokasi tidak valid atau berada di luar batas.",
+        ) from error
+
+    try:
+        result = await run_in_threadpool(
+            reverse_geocode,
+            latitude_value,
+            longitude_value,
+        )
+    except Exception:
+        logger.error("reverse_geocoding_request_failed")
+        result = {
+            "success": False,
+            "display_name": None,
+            "warning": "Nama lokasi otomatis tidak tersedia.",
+        }
+    response = {
+        "success": result["success"],
+        "location": {
+            "latitude": latitude_value,
+            "longitude": longitude_value,
+            "auto_name": result.get("display_name"),
+        },
+    }
+    if not result["success"]:
+        response["warning"] = result.get(
+            "warning", "Nama lokasi otomatis tidak tersedia."
+        )
+
+    return response
+
+
 @app.post("/predict")
 async def predict(
     request: Request,
     file: UploadFile = File(...),
+    input_source: str = Form("web_upload"),
+    latitude: str | None = Form(None),
+    longitude: str | None = Form(None),
+    location_accuracy: str | None = Form(None),
+    location_captured_at: str | None = Form(None),
+    location_auto_name: str | None = Form(None),
+    location_label: str | None = Form(None),
     current_user: dict = Depends(get_current_user),
 ):
     temp_path = None
+    prediction_started_at = time.perf_counter()
+    ai_duration_ms = 0.0
 
     try:
+        enforce_rate_limit(
+            request,
+            "predict_user",
+            limit=10,
+            window_seconds=60,
+            identity=current_user["id"],
+        )
+        enforce_rate_limit(
+            request,
+            "predict_ip",
+            limit=30,
+            window_seconds=60,
+        )
+        location, location_warnings = normalize_optional_location(
+            latitude,
+            longitude,
+            location_accuracy,
+            location_captured_at,
+        )
+        normalized_auto_name = normalize_optional_location_name(
+            location_auto_name,
+            "location_auto_name",
+            location_warnings,
+        )
+        normalized_location_label = normalize_optional_location_name(
+            location_label,
+            "location_label",
+            location_warnings,
+        )
+        if location["latitude"] is None or location["longitude"] is None:
+            if normalized_auto_name or normalized_location_label:
+                location_warnings.append(
+                    {
+                        "stage": "location_metadata",
+                        "reason": "nama_lokasi_tanpa_koordinat_diabaikan",
+                    }
+                )
+            normalized_auto_name = None
+            normalized_location_label = None
+
+        location["location_auto_name"] = normalized_auto_name
+        location["location_label"] = normalized_location_label
         contents = await file.read()
         file_size_bytes = len(contents)
 
@@ -126,7 +526,9 @@ async def predict(
             )
 
         try:
-            image = Image.open(io.BytesIO(contents)).convert("RGB")
+            image = ImageOps.exif_transpose(
+                Image.open(io.BytesIO(contents))
+            ).convert("RGB")
         except Exception:
             raise HTTPException(status_code=400, detail="File bukan gambar yang valid.")
 
@@ -139,12 +541,31 @@ async def predict(
             temp_file.write(contents)
             temp_path = temp_file.name
 
-        predicted_class, confidence, probabilities = predict_image(
-            model, temp_path, class_names
+        ai_started_at = time.perf_counter()
+        pipeline_result = await run_in_threadpool(
+            predict_image_with_pipeline,
+            ai_pipeline,
+            image,
+        )
+        ai_duration_ms = (time.perf_counter() - ai_started_at) * 1000
+        predicted_class = pipeline_result["predicted_class"]
+        confidence = pipeline_result["confidence"]
+        probabilities = pipeline_result["probabilities"]
+        annotated_image = pipeline_result["annotated_image"]
+        detections = pipeline_result["detections"]
+        response_warnings = location_warnings + sanitize_pipeline_warnings(
+            list(pipeline_result["warnings"])
         )
 
+        normalized_input_source = input_source.strip().lower()
+        if normalized_input_source not in {"camera", "gallery", "web_upload"}:
+            normalized_input_source = "web_upload"
+
         confidence_value = float(confidence)
-        should_save_history = confidence_value >= MIN_SAVE_CONFIDENCE
+        should_save_history = (
+            predicted_class is not None
+            and confidence_value >= MIN_SAVE_CONFIDENCE
+        )
 
         record = None
         image_urls = {
@@ -152,13 +573,20 @@ async def predict(
             "image_thumbnail_url": None,
         }
         storage_saved = False
+        detection_details_saved = False
 
         if not should_save_history:
-            history_message = (
-                f"Hasil prediksi tidak disimpan ke riwayat karena confidence "
-                f"{confidence_value:.2f}% berada di bawah batas "
-                f"{MIN_SAVE_CONFIDENCE:.2f}%."
-            )
+            if predicted_class is None:
+                history_message = (
+                    "Hasil prediksi tidak disimpan ke riwayat karena tidak "
+                    "ada TBS valid yang terdeteksi."
+                )
+            else:
+                history_message = (
+                    f"Hasil prediksi tidak disimpan ke riwayat karena confidence "
+                    f"{confidence_value:.2f}% berada di bawah batas "
+                    f"{MIN_SAVE_CONFIDENCE:.2f}%."
+                )
             storage_message = (
                 "Gambar tidak disimpan karena hasil prediksi memiliki "
                 "confidence rendah."
@@ -172,13 +600,43 @@ async def predict(
                     confidence=confidence_value,
                     probabilities=probabilities,
                     user_id=current_user["id"],
-                    input_source="web_upload",
+                    input_source=normalized_input_source,
                     image_width=image_width,
                     image_height=image_height,
                     file_size_bytes=file_size_bytes,
+                    latitude=location["latitude"],
+                    longitude=location["longitude"],
+                    location_accuracy=location["location_accuracy"],
+                    location_captured_at=location["location_captured_at"],
+                    location_auto_name=location["location_auto_name"],
+                    location_label=location["location_label"],
                 )
             finally:
                 db.close()
+
+            if record and detections:
+                db = SessionLocal()
+                try:
+                    saved_detection_count = save_prediction_detections(
+                        db=db,
+                        prediction_record_id=record["id"],
+                        detections=detections,
+                    )
+                    detection_details_saved = (
+                        saved_detection_count == len(detections)
+                    )
+                except Exception:
+                    logger.exception(
+                        "prediction_detection_persistence_failed"
+                    )
+                    response_warnings.append(
+                        {
+                            "stage": "database_persistence",
+                            "reason": "detail_per_TBS_gagal_disimpan",
+                        }
+                    )
+                finally:
+                    db.close()
 
             history_message = "Hasil prediksi berhasil disimpan ke riwayat."
             storage_message = "Gambar tidak disimpan."
@@ -202,7 +660,7 @@ async def predict(
             if storage_available:
                 try:
                     image_urls = upload_prediction_images(
-                        image=image,
+                        image=annotated_image,
                         record_id=record["id"],
                     )
 
@@ -224,11 +682,8 @@ async def predict(
                     storage_saved = True
                     storage_message = "Gambar berhasil disimpan."
 
-                except Exception as storage_error:
-                    print(
-                        "Prediksi tersimpan, tetapi gambar gagal disimpan:",
-                        storage_error,
-                    )
+                except Exception:
+                    logger.exception("prediction_storage_upload_failed")
                     storage_message = (
                         "Hasil prediksi tersimpan, tetapi gambar gagal "
                         "disimpan ke storage."
@@ -239,12 +694,13 @@ async def predict(
                     "karena kapasitas storage telah mencapai batas."
                 )
 
-        return {
+        response_payload = {
             "record_id": record["id"] if record else None,
             "predicted_class": predicted_class,
             "confidence": round(confidence_value, 2),
             "history": {
                 "saved": should_save_history,
+                "detection_details_saved": detection_details_saved,
                 "message": history_message,
                 "minimum_confidence": MIN_SAVE_CONFIDENCE,
             },
@@ -252,6 +708,24 @@ async def predict(
                 key: round(float(value), 2)
                 for key, value in probabilities.items()
             },
+            "summary": pipeline_result["summary"],
+            "detections": [
+                {
+                    **detection,
+                    "detector_confidence": round(
+                        float(detection["detector_confidence"]), 2
+                    ),
+                    "maturity_confidence": round(
+                        float(detection["maturity_confidence"]), 2
+                    ),
+                    "probabilities": {
+                        key: round(float(value), 2)
+                        for key, value in detection["probabilities"].items()
+                    },
+                }
+                for detection in detections
+            ],
+            "warnings": response_warnings,
             "image_processed_url": image_urls[
                 "image_processed_url"
             ],
@@ -263,11 +737,27 @@ async def predict(
                 "message": storage_message,
                 "limit_gb": APP_STORAGE_LIMIT_GB,
             },
+            "location": build_location_response(location),
         }
+        logger.info(
+            "prediction_completed total_duration_ms=%.2f "
+            "ai_duration_ms=%.2f detection_count=%d history_saved=%s "
+            "storage_saved=%s",
+            (time.perf_counter() - prediction_started_at) * 1000,
+            ai_duration_ms,
+            len(detections),
+            should_save_history,
+            storage_saved,
+        )
+        return response_payload
     except HTTPException:
         raise
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=str(error))
+    except Exception:
+        logger.exception("prediction_request_failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Prediction gagal diproses.",
+        ) from None
     finally:
         if temp_path and os.path.exists(temp_path):
             try:
@@ -311,6 +801,58 @@ def prediction_detail(
         db.close()
 
 
+@app.patch("/predictions/{record_id}/location-label")
+def update_location_label(
+    record_id: str,
+    payload: UpdateLocationLabelRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    enforce_rate_limit(
+        request,
+        "location_label_user",
+        limit=30,
+        window_seconds=60,
+        identity=current_user["id"],
+    )
+    normalized_label = " ".join(
+        str(payload.location_label or "").split()
+    )
+    if len(normalized_label) > MAX_LOCATION_NAME_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nama lokasi maksimal "
+                f"{MAX_LOCATION_NAME_LENGTH} karakter."
+            ),
+        )
+
+    db = SessionLocal()
+    try:
+        updated = update_prediction_location_label(
+            db=db,
+            record_id=record_id,
+            user_id=current_user["id"],
+            location_label=normalized_label or None,
+        )
+        if updated is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Data prediksi tidak ditemukan",
+            )
+
+        return {
+            "message": "Nama lokasi berhasil diperbarui.",
+            "record_id": updated["id"],
+            "location": {
+                "auto_name": updated["location_auto_name"],
+                "label": updated["location_label"],
+            },
+        }
+    finally:
+        db.close()
+
+
 @app.delete("/predictions/{record_id}")
 def delete_prediction(
     record_id: str,
@@ -331,10 +873,14 @@ def delete_prediction(
                 image_processed_url=record.get("image_processed_url"),
                 image_thumbnail_url=record.get("image_thumbnail_url"),
             )
-        except Exception as storage_error:
-            print("Gagal menghapus gambar dari Supabase:", storage_error)
+        except Exception:
+            logger.exception("prediction_storage_delete_failed")
 
-        deleted_id = delete_prediction_record(db, record_id)
+        deleted_id = delete_prediction_record(
+            db,
+            record_id,
+            user_id=current_user["id"],
+        )
         if deleted_id is None:
             raise HTTPException(status_code=404, detail="Data prediksi gagal dihapus")
 

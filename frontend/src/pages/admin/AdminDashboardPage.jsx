@@ -12,15 +12,15 @@ import {
 
 const CLASS_META = {
   belum_masak: {
-    label: "Belum Masak",
+    label: "Belum Matang",
     icon: "🟢",
   },
   masak: {
-    label: "Masak",
+    label: "Matang",
     icon: "🟠",
   },
   terlalu_masak: {
-    label: "Terlalu Masak",
+    label: "Terlalu Matang",
     icon: "🔴",
   },
 };
@@ -75,6 +75,126 @@ function formatConfidence(value) {
   const number = Number(value || 0);
   const percentage = number <= 1 ? number * 100 : number;
   return `${percentage.toFixed(2)}%`;
+}
+
+function toSafeCount(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0
+    ? Math.trunc(number)
+    : fallback;
+}
+
+function hasNumericValue(value) {
+  return value !== null && value !== undefined && Number.isFinite(Number(value));
+}
+
+function getImageClassCount(distribution, className) {
+  const value = distribution?.[className];
+
+  if (value && typeof value === "object") {
+    return toSafeCount(value.total);
+  }
+
+  return toSafeCount(value);
+}
+
+function ImageDistributionPanel({ imageByClass, predictionByClass }) {
+  return (
+    <article className="admin-panel">
+      <div className="admin-panel-title">
+        <div>
+          <span>Distribusi ringkasan foto</span>
+          <h3>Jumlah foto berdasarkan kelas</h3>
+        </div>
+      </div>
+
+      <div className="admin-class-list">
+        {Object.entries(CLASS_META).map(([key, meta]) => {
+          const total = getImageClassCount(imageByClass, key);
+          const average = predictionByClass?.[key]?.avg_confidence;
+
+          return (
+            <div key={key}>
+              <div>
+                <span aria-hidden="true">{meta.icon}</span>
+                <strong>{meta.label}</strong>
+              </div>
+
+              <div className="admin-class-value">
+                <strong>{total} foto</strong>
+                {hasNumericValue(average) && (
+                  <small>
+                    Rata-rata ringkasan {formatConfidence(average)}
+                  </small>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+function TbsDistributionPanel({
+  tbsByClass,
+  avgDetectorConfidence,
+  detailsUnavailable,
+  coverageMessage,
+  coverageCaption,
+  coverageStatus,
+}) {
+  return (
+    <article className="admin-panel admin-tbs-panel">
+      <div className="admin-panel-title">
+        <div>
+          <span>Distribusi TBS</span>
+          <h3>Jumlah TBS berdasarkan kelas</h3>
+        </div>
+
+        {!detailsUnavailable && hasNumericValue(avgDetectorConfidence) && (
+          <div className="admin-detector-metric">
+            <small>Rata-rata deteksi YOLO</small>
+            <strong>{formatConfidence(avgDetectorConfidence)}</strong>
+          </div>
+        )}
+      </div>
+
+      <div className="admin-class-list">
+        {Object.entries(CLASS_META).map(([key, meta]) => {
+          const classStats = tbsByClass?.[key];
+          const total = toSafeCount(classStats?.total);
+          const average = classStats?.avg_maturity_confidence;
+
+          return (
+            <div key={key}>
+              <div>
+                <span aria-hidden="true">{meta.icon}</span>
+                <strong>{meta.label}</strong>
+              </div>
+
+              <div className="admin-class-value">
+                <strong>{detailsUnavailable ? "—" : `${total} TBS`}</strong>
+                {!detailsUnavailable && total > 0 && hasNumericValue(average) && (
+                  <small>
+                    Rata-rata kematangan {formatConfidence(average)}
+                  </small>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className={`admin-coverage-note ${coverageStatus}`} role="note">
+        <span aria-hidden="true">ⓘ</span>
+        <div>
+          <strong>{coverageMessage}</strong>
+          {coverageCaption && <small>{coverageCaption}</small>}
+        </div>
+      </div>
+    </article>
+  );
 }
 
 function AdminDashboardPage({ currentUser }) {
@@ -214,6 +334,19 @@ function AdminDashboardPage({ currentUser }) {
   const predictionByClass =
     stats?.predictions?.by_class || {};
 
+  const imageStats =
+    stats?.predictions?.image_stats;
+
+  const imageByClass =
+    imageStats?.by_summary_class ||
+    predictionByClass;
+
+  const tbsStats =
+    stats?.predictions?.tbs_stats;
+
+  const tbsByClass =
+    tbsStats?.by_class || {};
+
   const recentPredictions =
     stats?.predictions?.recent || [];
 
@@ -223,8 +356,72 @@ function AdminDashboardPage({ currentUser }) {
   const activeUsers =
     stats?.users?.active || 0;
 
-  const totalPredictions =
-    stats?.predictions?.total || 0;
+  const totalImages = toSafeCount(
+    imageStats?.total_images,
+    toSafeCount(stats?.predictions?.total),
+  );
+
+  const totalTbs = toSafeCount(
+    tbsStats?.total_tbs,
+  );
+
+  const coverage = tbsStats?.coverage;
+
+  const imagesWithDetectionDetails = toSafeCount(
+    coverage?.images_with_detection_details,
+  );
+
+  const imagesWithoutDetectionDetails = toSafeCount(
+    coverage?.images_without_detection_details,
+    Math.max(totalImages - imagesWithDetectionDetails, 0),
+  );
+
+  const rawCoveragePercentage = Number(
+    coverage?.coverage_percentage,
+  );
+
+  const coveragePercentage = Number.isFinite(
+    rawCoveragePercentage,
+  )
+    ? Math.min(Math.max(rawCoveragePercentage, 0), 100)
+    : totalImages > 0
+      ? (imagesWithDetectionDetails / totalImages) * 100
+      : 0;
+
+  const formattedCoveragePercentage =
+    new Intl.NumberFormat("id-ID", {
+      maximumFractionDigits: 2,
+    }).format(coveragePercentage);
+
+  const tbsDetailsUnavailable =
+    totalImages > 0 &&
+    (!tbsStats || imagesWithDetectionDetails === 0);
+
+  let coverageStatus = "complete";
+  let coverageMessage = "Belum ada foto tersimpan.";
+  let coverageCaption = "Statistik TBS akan tersedia setelah ada hasil baru.";
+
+  if (tbsDetailsUnavailable) {
+    coverageStatus = "unavailable";
+    coverageMessage = "Detail TBS belum tersedia untuk data ini.";
+    coverageCaption =
+      "Record tanpa detail multi-deteksi tidak dianggap sebagai nol TBS.";
+  } else if (
+    totalImages > 0 &&
+    (imagesWithoutDetectionDetails > 0 || coveragePercentage < 100)
+  ) {
+    coverageStatus = "partial";
+    coverageMessage =
+      `Detail TBS tersedia untuk ${imagesWithDetectionDetails} dari ` +
+      `${totalImages} foto (${formattedCoveragePercentage}%).`;
+    coverageCaption =
+      "Statistik TBS dihitung dari hasil yang memiliki detail multi-deteksi tersimpan.";
+  } else if (totalImages > 0) {
+    coverageMessage =
+      `Detail TBS tersedia untuk seluruh ${totalImages} foto ` +
+      `(${formattedCoveragePercentage}%).`;
+    coverageCaption = "Seluruh foto memiliki detail multi-deteksi tersimpan.";
+  }
 
   const totalLogs =
     stats?.activity_logs?.total || 0;
@@ -480,27 +677,47 @@ function AdminDashboardPage({ currentUser }) {
             </button>
           </section>
 
-          <section className="admin-stat-grid">
+          <section className="admin-stat-grid admin-overview-grid">
             <article>
               <i>👥</i>
               <div>
                 <small>Total pengguna</small>
                 <strong>{totalUsers}</strong>
                 <span>
-                  {activeUsers} akun aktif
+                  Seluruh akun terdaftar
                 </span>
               </div>
             </article>
 
             <article>
-              <i>📊</i>
+              <i>✅</i>
               <div>
-                <small>Total prediksi</small>
+                <small>User aktif</small>
+                <strong>{activeUsers}</strong>
+                <span>Akun yang dapat digunakan</span>
+              </div>
+            </article>
+
+            <article>
+              <i>📷</i>
+              <div>
+                <small>Foto tersimpan</small>
+                <strong>{totalImages}</strong>
+                <span>Record hasil klasifikasi</span>
+              </div>
+            </article>
+
+            <article>
+              <i>🌴</i>
+              <div>
+                <small>Total TBS</small>
                 <strong>
-                  {totalPredictions}
+                  {tbsDetailsUnavailable ? "—" : totalTbs}
                 </strong>
                 <span>
-                  Seluruh hasil klasifikasi
+                  {tbsDetailsUnavailable
+                    ? "Detail belum tersedia"
+                    : "Deteksi individual tersimpan"}
                 </span>
               </div>
             </article>
@@ -531,48 +748,10 @@ function AdminDashboardPage({ currentUser }) {
           </section>
 
           <section className="admin-two-column">
-            <article className="admin-panel">
-              <div className="admin-panel-title">
-                <div>
-                  <span>Distribusi prediksi</span>
-                  <h3>Hasil berdasarkan kelas</h3>
-                </div>
-              </div>
-
-              <div className="admin-class-list">
-                {Object.entries(CLASS_META).map(
-                  ([key, meta]) => {
-                    const total =
-                      predictionByClass?.[key]
-                        ?.total || 0;
-
-                    const avg =
-                      predictionByClass?.[key]
-                        ?.avg_confidence || 0;
-
-                    return (
-                      <div key={key}>
-                        <div>
-                          <span>{meta.icon}</span>
-                          <strong>
-                            {meta.label}
-                          </strong>
-                        </div>
-
-                        <div className="admin-class-value">
-                          <strong>
-                            {total}
-                          </strong>
-                          <small>
-                            Avg {formatConfidence(avg)}
-                          </small>
-                        </div>
-                      </div>
-                    );
-                  }
-                )}
-              </div>
-            </article>
+            <ImageDistributionPanel
+              imageByClass={imageByClass}
+              predictionByClass={predictionByClass}
+            />
 
             <article className="admin-panel">
               <div className="admin-panel-title">
@@ -606,6 +785,15 @@ function AdminDashboardPage({ currentUser }) {
               </div>
             </article>
           </section>
+
+          <TbsDistributionPanel
+            tbsByClass={tbsByClass}
+            avgDetectorConfidence={tbsStats?.avg_detector_confidence}
+            detailsUnavailable={tbsDetailsUnavailable}
+            coverageMessage={coverageMessage}
+            coverageCaption={coverageCaption}
+            coverageStatus={coverageStatus}
+          />
 
           <section className="admin-panel admin-recent">
             <div className="admin-panel-title">
@@ -740,7 +928,7 @@ function AdminDashboardPage({ currentUser }) {
                     <tr>
                       <th>Pengguna</th>
                       <th>Role</th>
-                      <th>Prediksi</th>
+                      <th>Foto tersimpan</th>
                       <th>Status</th>
                       <th>Aksi</th>
                     </tr>
@@ -830,33 +1018,50 @@ function AdminDashboardPage({ currentUser }) {
           <section className="admin-section-heading">
             <div>
               <span>Data prediksi</span>
-              <h2>Ringkasan hasil klasifikasi</h2>
+              <h2>Statistik foto dan TBS</h2>
             </div>
           </section>
 
-          <section className="admin-stat-grid three">
-            {Object.entries(CLASS_META).map(
-              ([key, meta]) => (
-                <article key={key}>
-                  <i>{meta.icon}</i>
+          <section className="admin-stat-grid admin-prediction-summary">
+            <article>
+              <i>📷</i>
+              <div>
+                <small>Foto tersimpan</small>
+                <strong>{totalImages}</strong>
+                <span>Jumlah prediction record</span>
+              </div>
+            </article>
 
-                  <div>
-                    <small>{meta.label}</small>
-                    <strong>
-                      {predictionByClass?.[key]
-                        ?.total || 0}
-                    </strong>
-                    <span>
-                      Rata-rata confidence{" "}
-                      {formatConfidence(
-                        predictionByClass?.[key]
-                          ?.avg_confidence || 0
-                      )}
-                    </span>
-                  </div>
-                </article>
-              )
-            )}
+            <article>
+              <i>🌴</i>
+              <div>
+                <small>Total TBS</small>
+                <strong>
+                  {tbsDetailsUnavailable ? "—" : totalTbs}
+                </strong>
+                <span>
+                  {tbsDetailsUnavailable
+                    ? "Detail belum tersedia"
+                    : "Berdasarkan detail multi-deteksi"}
+                </span>
+              </div>
+            </article>
+          </section>
+
+          <section className="admin-two-column">
+            <ImageDistributionPanel
+              imageByClass={imageByClass}
+              predictionByClass={predictionByClass}
+            />
+
+            <TbsDistributionPanel
+              tbsByClass={tbsByClass}
+              avgDetectorConfidence={tbsStats?.avg_detector_confidence}
+              detailsUnavailable={tbsDetailsUnavailable}
+              coverageMessage={coverageMessage}
+              coverageCaption={coverageCaption}
+              coverageStatus={coverageStatus}
+            />
           </section>
 
           <section className="admin-panel admin-recent">

@@ -1,5 +1,5 @@
+import logging
 from typing import Optional
-import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import text
@@ -7,9 +7,19 @@ from sqlalchemy.orm import Session
 
 from activity_log import log_activity
 from auth import get_current_admin
+from config_utils import env_float
 from database import get_db
-from crud import get_oldest_prediction_images, clear_prediction_image_urls
+from crud import (
+    DETECTION_CLASS_TO_INDEX,
+    build_empty_tbs_statistics,
+    clear_prediction_image_urls,
+    get_oldest_prediction_images,
+    get_tbs_statistics,
+)
 from storage_supabase import delete_prediction_images_from_supabase
+
+
+logger = logging.getLogger(__name__)
 
 
 # Semua endpoint pada file ini otomatis memiliki prefix /admin.
@@ -97,6 +107,12 @@ def get_admin_stats(
     total_logs = 0
     predictions_by_class = {}
     recent_predictions = []
+    prediction_rows = []
+    image_summary_by_class = {
+        class_name: 0
+        for class_name in DETECTION_CLASS_TO_INDEX
+    }
+    tbs_stats = build_empty_tbs_statistics()
 
     if table_exists(db, "prediction_records"):
         total_predictions = int(
@@ -131,6 +147,20 @@ def get_admin_stats(
             }
             for row in prediction_rows
         }
+        image_summary_by_class = {
+            class_name: int(
+                predictions_by_class.get(class_name, {}).get("total", 0)
+            )
+            for class_name in DETECTION_CLASS_TO_INDEX
+        }
+
+        if table_exists(db, "prediction_detections"):
+            tbs_stats = get_tbs_statistics(
+                db=db,
+                total_images=total_predictions,
+            )
+        else:
+            tbs_stats = build_empty_tbs_statistics(total_predictions)
 
         rows = db.execute(
             text(
@@ -192,6 +222,11 @@ def get_admin_stats(
             "total": total_predictions,
             "by_class": predictions_by_class,
             "recent": recent_predictions,
+            "image_stats": {
+                "total_images": total_predictions,
+                "by_summary_class": image_summary_by_class,
+            },
+            "tbs_stats": tbs_stats,
         },
         "activity_logs": {
             "total": total_logs,
@@ -669,8 +704,8 @@ def get_storage_stats(
     Jika tabel prediction_records belum tersedia, endpoint mengembalikan
     penggunaan nol.
     """
-    storage_limit_gb = float(
-        os.getenv("APP_STORAGE_LIMIT_GB", "1")
+    storage_limit_gb = env_float(
+        "APP_STORAGE_LIMIT_GB", 1, minimum=0.01
     )
     storage_limit_bytes = int(
         storage_limit_gb * 1024 * 1024 * 1024
@@ -873,12 +908,16 @@ def cleanup_old_storage_images(
                 storage_result.get("deleted_paths", [])
             )
 
-        except Exception as error:
+        except Exception:
             db.rollback()
+            logger.exception(
+                "Admin storage cleanup failed for record %s",
+                item["id"],
+            )
             failed_records.append(
                 {
                     "record_id": item["id"],
-                    "error": str(error),
+                    "error": "Pembersihan gambar gagal.",
                 }
             )
 

@@ -1,5 +1,17 @@
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+function resolveApiBaseUrl() {
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim();
+  if (configured) {
+    return configured.replace(/\/+$/, "");
+  }
+  if (import.meta.env.PROD) {
+    throw new Error(
+      "VITE_API_BASE_URL wajib diisi untuk production build.",
+    );
+  }
+  return "http://127.0.0.1:8000";
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
 
 const TOKEN_KEY = "sawitvision_v3_token";
 const USER_KEY = "sawitvision_v3_user";
@@ -190,12 +202,62 @@ export async function logoutUser() {
 // PREDIKSI
 // =========================================================
 
-export async function predictPalmImage(imageFile, inputSource = "gallery") {
+export async function reverseGeocodeLocation(latitude, longitude) {
+  const searchParams = new URLSearchParams({
+    latitude: String(latitude),
+    longitude: String(longitude),
+  });
+
+  return apiRequest(`/location/reverse-geocode?${searchParams.toString()}`, {
+    method: "GET",
+  });
+}
+
+export async function predictPalmImage(
+  imageFile,
+  inputSource = "gallery",
+  location = null,
+) {
   const formData = new FormData();
 
   formData.append("file", imageFile);
 
   formData.append("input_source", inputSource);
+
+  const latitude = Number(location?.latitude);
+  const longitude = Number(location?.longitude);
+  const accuracy = Number(location?.accuracy);
+  const hasCoordinates =
+    location?.latitude !== null &&
+    location?.latitude !== undefined &&
+    location?.longitude !== null &&
+    location?.longitude !== undefined &&
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude);
+
+  if (hasCoordinates) {
+    formData.append("latitude", String(latitude));
+    formData.append("longitude", String(longitude));
+
+    if (Number.isFinite(accuracy) && accuracy >= 0) {
+      formData.append("location_accuracy", String(accuracy));
+    }
+
+    if (location?.capturedAt) {
+      formData.append("location_captured_at", location.capturedAt);
+    }
+
+    const autoName = String(location?.autoName || "").trim();
+    const label = String(location?.label || "").trim();
+
+    if (autoName) {
+      formData.append("location_auto_name", autoName);
+    }
+
+    if (label) {
+      formData.append("location_label", label);
+    }
+  }
 
   return apiRequest("/predict", {
     method: "POST",
@@ -221,6 +283,15 @@ export async function getPredictions({ limit = 20, offset = 0 } = {}) {
 export async function getPredictionDetail(recordId) {
   return apiRequest(`/predictions/${recordId}`, {
     method: "GET",
+  });
+}
+
+export async function updatePredictionLocationLabel(recordId, locationLabel) {
+  return apiRequest(`/predictions/${recordId}/location-label`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      location_label: locationLabel,
+    }),
   });
 }
 
