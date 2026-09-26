@@ -1,10 +1,8 @@
-# LEGACY EfficientNet/TensorFlow environment only.
-# Do not use this file for Docker/Railway production.
-
 fastapi
 uvicorn[standard]
 python-multipart
 pillow
+
 sqlalchemy
 psycopg2-binary
 python-dotenv
@@ -15,16 +13,10 @@ passlib[bcrypt]
 python-jose[cryptography]
 email-validator
 
-tensorflow-cpu==2.10.1
-numpy==1.23.5
-protobuf==3.19.6
-h5py==3.7.0
-huggingface-hub
-
 sendgrid
 openpyxl==3.1.5
 
-ultralytics-opencv-headless
 torch
 torchvision
 transformers
+ultralytics-opencv-headless
