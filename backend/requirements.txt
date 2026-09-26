@@ -24,8 +24,7 @@ huggingface-hub
 sendgrid
 openpyxl==3.1.5
 
-opencv-python-headless
-ultralytics
+ultralytics-opencv-headless
 torch
 torchvision
 transformers
