@@ -320,7 +320,7 @@ class AIPipeline:
                 "AI_MIN_CROP_SIZE", 8, minimum=1, maximum=8192
             ),
             dino_batch_size=env_int(
-                "DINO_BATCH_SIZE", 8, minimum=1, maximum=1024
+                "DINO_BATCH_SIZE", 4, minimum=1, maximum=1024
             ),
             use_amp=env_bool("AI_USE_AMP", True),
             annotate_detector_confidence=env_bool(
@@ -431,30 +431,42 @@ class AIPipeline:
         return nullcontext()
 
     def _run_dino_batch(self, tensors: list[Tensor]) -> Tensor:
-        batch = torch.stack(tensors).to(self.device, non_blocking=True)
-        self.classifier.eval()
-        with torch.inference_mode():
-            with self._amp_context():
-                logits = self.classifier(batch)
-            probabilities = torch.softmax(logits.float(), dim=1)
+        batch = None
+        logits = None
+        probabilities = None
+        try:
+            batch = torch.stack(tensors).to(
+                self.device,
+                non_blocking=True,
+            )
+            self.classifier.eval()
+            with torch.inference_mode():
+                with self._amp_context():
+                    logits = self.classifier(batch)
+                probabilities = torch.softmax(logits.float(), dim=1)
 
-        if probabilities.ndim != 2 or probabilities.shape[1] != len(
-            CLASS_NAMES
-        ):
-            raise AIPipelineError(
-                "Output DINO tidak memiliki shape [batch, 3]: "
-                f"{tuple(probabilities.shape)}"
+            if probabilities.ndim != 2 or probabilities.shape[1] != len(
+                CLASS_NAMES
+            ):
+                raise AIPipelineError(
+                    "Output DINO tidak memiliki shape [batch, 3]: "
+                    f"{tuple(probabilities.shape)}"
+                )
+            if not torch.isfinite(probabilities).all():
+                raise AIPipelineError(
+                    "DINO menghasilkan probability non-finite."
+                )
+            sum_error = float(
+                (probabilities.sum(dim=1) - 1.0).abs().max().cpu()
             )
-        if not torch.isfinite(probabilities).all():
-            raise AIPipelineError("DINO menghasilkan probability non-finite.")
-        sum_error = float(
-            (probabilities.sum(dim=1) - 1.0).abs().max().cpu()
-        )
-        if sum_error > 1e-5:
-            raise AIPipelineError(
-                f"Jumlah softmax DINO menyimpang terlalu besar: {sum_error}"
-            )
-        return probabilities.detach().cpu()
+            if sum_error > 1e-5:
+                raise AIPipelineError(
+                    "Jumlah softmax DINO menyimpang terlalu besar: "
+                    f"{sum_error}"
+                )
+            return probabilities.detach().cpu()
+        finally:
+            del logits, probabilities, batch
 
     @staticmethod
     def _warning(
@@ -530,28 +542,11 @@ class AIPipeline:
                 )
                 continue
 
-            try:
-                crop = image.crop((x1, y1, x2, y2)).convert("RGB")
-                if crop.width <= 0 or crop.height <= 0:
-                    raise ValueError("crop kosong")
-                tensor = self.dino_transform(crop)
-            except Exception as error:
-                warnings.append(
-                    self._warning(
-                        index,
-                        "crop_preprocessing",
-                        f"{type(error).__name__}: {error}",
-                        clamped_bbox,
-                    )
-                )
-                continue
-
             prepared.append(
                 {
                     "detection_index": index,
                     "bbox": clamped_bbox,
                     "detector_confidence": float(raw_confidence) * 100.0,
-                    "tensor": tensor,
                 }
             )
 
@@ -559,37 +554,69 @@ class AIPipeline:
 
     def _classify_prepared(
         self,
+        image: Image.Image,
         prepared: list[dict[str, Any]],
         warnings: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         detections: list[dict[str, Any]] = []
         for start in range(0, len(prepared), self.dino_batch_size):
             items = prepared[start : start + self.dino_batch_size]
+            valid_items = []
+            tensors = []
+            for item in items:
+                crop = None
+                try:
+                    x1, y1, x2, y2 = item["bbox"]
+                    crop = image.crop((x1, y1, x2, y2))
+                    if crop.width <= 0 or crop.height <= 0:
+                        raise ValueError("crop kosong")
+                    tensors.append(self.dino_transform(crop))
+                    valid_items.append(item)
+                except Exception as error:
+                    warnings.append(
+                        self._warning(
+                            item["detection_index"],
+                            "crop_preprocessing",
+                            f"{type(error).__name__}: {error}",
+                            item["bbox"],
+                        )
+                    )
+                finally:
+                    if crop is not None:
+                        crop.close()
+
+            if not valid_items:
+                continue
             try:
-                probability_batch = self._run_dino_batch(
-                    [item["tensor"] for item in items]
-                )
-                batch_pairs = list(zip(items, probability_batch, strict=True))
+                probability_batch = self._run_dino_batch(tensors)
+                batch_pairs = [
+                    (item, probability_tensor.tolist())
+                    for item, probability_tensor in zip(
+                        valid_items,
+                        probability_batch,
+                        strict=True,
+                    )
+                ]
+                del probability_batch
             except Exception as batch_error:
                 # A large batch may fail on a constrained GPU. Retry each
                 # crop separately so one failure does not discard valid TBS.
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
                 warnings.append(
                     self._warning(
-                        items[0]["detection_index"],
+                        valid_items[0]["detection_index"],
                         "dino_batch",
                         f"batch_retry: {type(batch_error).__name__}: "
                         f"{batch_error}",
                     )
                 )
                 batch_pairs = []
-                for item in items:
+                for item, tensor in zip(valid_items, tensors, strict=True):
                     try:
-                        single_probability = self._run_dino_batch(
-                            [item["tensor"]]
-                        )[0]
-                        batch_pairs.append((item, single_probability))
+                        single_probability = self._run_dino_batch([tensor])[0]
+                        batch_pairs.append(
+                            (item, single_probability.tolist())
+                        )
+                        del single_probability
                     except Exception as item_error:
                         warnings.append(
                             self._warning(
@@ -599,11 +626,13 @@ class AIPipeline:
                                 item["bbox"],
                             )
                         )
+            finally:
+                del tensors
 
-            for item, probability_tensor in batch_pairs:
+            for item, probability_row in batch_pairs:
                 probability_values = [
                     float(value) * 100.0
-                    for value in probability_tensor.tolist()
+                    for value in probability_row
                 ]
                 class_index = max(
                     range(len(CLASS_NAMES)),
@@ -627,6 +656,7 @@ class AIPipeline:
                         },
                     }
                 )
+            del batch_pairs
 
         if prepared and not detections:
             raise AIPipelineError(
@@ -650,7 +680,7 @@ class AIPipeline:
         image: Image.Image,
         detections: list[dict[str, Any]],
     ) -> Image.Image:
-        annotated = image.copy().convert("RGB")
+        annotated = image.copy()
         draw = ImageDraw.Draw(annotated)
         font = self._annotation_font(annotated)
         line_width = max(2, round(min(annotated.size) * 0.004))
@@ -715,51 +745,103 @@ class AIPipeline:
             )
         return annotated
 
-    def predict(self, image: Image.Image) -> dict[str, Any]:
+    @staticmethod
+    def _normalize_source_image(
+        image: Image.Image,
+    ) -> tuple[Image.Image, bool]:
+        """Return full-quality, correctly oriented RGB pixels with few copies."""
+        try:
+            orientation = int(image.getexif().get(274, 1) or 1)
+        except (AttributeError, TypeError, ValueError):
+            orientation = 1
+
+        if orientation == 1:
+            image.load()
+            if image.mode == "RGB":
+                return image, False
+            return image.convert("RGB"), True
+
+        transposed = ImageOps.exif_transpose(image)
+        if transposed.mode == "RGB":
+            return transposed, True
+        converted = transposed.convert("RGB")
+        transposed.close()
+        return converted, True
+
+    def predict(
+        self,
+        image: Image.Image,
+        annotation_min_confidence: float | None = None,
+    ) -> dict[str, Any]:
         """Run YOLO -> clamped crops -> DINO and return one image result."""
         if not isinstance(image, Image.Image):
             raise TypeError("AIPipeline.predict membutuhkan PIL.Image.")
-        normalized_image = ImageOps.exif_transpose(image).convert("RGB")
+        normalized_image, owns_normalized_image = self._normalize_source_image(
+            image
+        )
         if normalized_image.width <= 0 or normalized_image.height <= 0:
             raise AIPipelineError("Dimensi gambar tidak valid.")
 
-        with self._inference_lock:
-            try:
-                yolo_results = self.detector.predict(
-                    source=normalized_image,
-                    imgsz=self.yolo_imgsz,
-                    conf=self.yolo_confidence,
-                    iou=self.yolo_iou,
-                    device=str(self.device),
-                    verbose=False,
+        try:
+            with self._inference_lock, torch.inference_mode():
+                try:
+                    yolo_results = self.detector.predict(
+                        source=normalized_image,
+                        imgsz=self.yolo_imgsz,
+                        conf=self.yolo_confidence,
+                        iou=self.yolo_iou,
+                        device=str(self.device),
+                        verbose=False,
+                    )
+                except Exception as error:
+                    raise AIPipelineError(
+                        f"YOLO inference gagal: {type(error).__name__}: {error}"
+                    ) from error
+
+                if len(yolo_results) != 1:
+                    raise AIPipelineError(
+                        "YOLO harus mengembalikan tepat satu result untuk satu "
+                        f"gambar; diterima {len(yolo_results)}."
+                    )
+
+                prepared, warnings = self._prepare_crops(
+                    normalized_image,
+                    yolo_results[0].boxes,
                 )
-            except Exception as error:
-                raise AIPipelineError(
-                    f"YOLO inference gagal: {type(error).__name__}: {error}"
-                ) from error
-
-            if len(yolo_results) != 1:
-                raise AIPipelineError(
-                    "YOLO harus mengembalikan tepat satu result untuk satu gambar; "
-                    f"diterima {len(yolo_results)}."
+                del yolo_results
+                # Explicitly avoid DINO when no valid crop exists.
+                detections = (
+                    self._classify_prepared(
+                        normalized_image,
+                        prepared,
+                        warnings,
+                    )
+                    if prepared
+                    else []
                 )
+                del prepared
 
-            prepared, warnings = self._prepare_crops(
-                normalized_image,
-                yolo_results[0].boxes,
+            compatibility = summarize_detections(detections)
+            should_annotate = (
+                annotation_min_confidence is None
+                or (
+                    compatibility["predicted_class"] is not None
+                    and float(compatibility["confidence"])
+                    >= float(annotation_min_confidence)
+                )
             )
-            # Explicitly avoid DINO when no valid crop exists.
-            detections = (
-                self._classify_prepared(prepared, warnings)
-                if prepared
-                else []
+            annotated_image = (
+                self.annotate_image(normalized_image, detections)
+                if should_annotate
+                else None
             )
-
-        compatibility = summarize_detections(detections)
-        annotated_image = self.annotate_image(normalized_image, detections)
-        return {
-            **compatibility,
-            "detections": detections,
-            "warnings": warnings,
-            "annotated_image": annotated_image,
-        }
+            return {
+                **compatibility,
+                "detections": detections,
+                "warnings": warnings,
+                "annotated_image": annotated_image,
+                "image_size": normalized_image.size,
+            }
+        finally:
+            if owns_normalized_image:
+                normalized_image.close()

@@ -591,8 +591,8 @@ function PredictionPage({ onOpenHistory }) {
       return;
     }
 
-    if (selected.size > 10 * 1024 * 1024) {
-      setError("Ukuran gambar maksimal 10 MB.");
+    if (selected.size > 16 * 1024 * 1024) {
+      setError("Ukuran gambar maksimal 16 MB.");
       event.target.value = "";
       return;
     }
@@ -644,9 +644,15 @@ function PredictionPage({ onOpenHistory }) {
       const response = await predictPalmImage(file, source, location);
       setResult(response);
     } catch (requestError) {
-      setError(
-        requestError.message || "Klasifikasi gagal. Silakan coba kembali.",
-      );
+      if (requestError?.status === 413) {
+        setError("Ukuran atau resolusi foto terlalu besar untuk diproses.");
+      } else if (requestError?.status === 422) {
+        setError("File yang dipilih bukan foto yang valid.");
+      } else {
+        setError(
+          requestError.message || "Klasifikasi gagal. Silakan coba kembali.",
+        );
+      }
     } finally {
       setLoading(false);
     }

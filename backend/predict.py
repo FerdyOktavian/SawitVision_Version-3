@@ -156,6 +156,10 @@ def load_ai_pipeline() -> "AIPipeline":
 def predict_image_with_pipeline(
     pipeline: "AIPipeline",
     image: "Image.Image",
+    annotation_min_confidence: float | None = None,
 ) -> dict:
     """Compatibility adapter used by ``main.py`` during the POC phase."""
-    return pipeline.predict(image)
+    return pipeline.predict(
+        image,
+        annotation_min_confidence=annotation_min_confidence,
+    )

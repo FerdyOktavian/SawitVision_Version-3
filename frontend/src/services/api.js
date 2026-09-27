@@ -114,7 +114,7 @@ async function apiRequest(endpoint, options = {}) {
   try {
     data = await response.json();
   } catch {
-    data = null;
+    // Respons tanpa JSON tetap ditangani melalui status HTTP di bawah.
   }
 
   if (!response.ok) {
@@ -123,7 +123,9 @@ async function apiRequest(endpoint, options = {}) {
       data?.message ||
       "Terjadi kesalahan saat memproses permintaan.";
 
-    throw new Error(message);
+    const requestError = new Error(message);
+    requestError.status = response.status;
+    throw requestError;
   }
 
   return data;

@@ -14,12 +14,11 @@ riwayat, statistik, dan penghapusan hasil prediksi. Logika daftar/login
 berada di auth_routes.py, sedangkan pemeriksaan token berada di auth.py.
 """
 
-import io
+import asyncio
 import logging
 import math
-import os
-import tempfile
 import time
+import warnings
 from datetime import datetime
 
 from fastapi import (
@@ -34,7 +33,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from PIL import Image, ImageOps
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict
 from starlette.concurrency import run_in_threadpool
 
@@ -46,6 +45,7 @@ from config_utils import (
     cors_origins as configured_cors_origins,
     env_bool,
     env_float,
+    env_int,
     env_text,
 )
 from crud import (
@@ -65,6 +65,13 @@ from geocoding import (
     MAX_LOCATION_NAME_LENGTH,
     reverse_geocode,
     validate_coordinates,
+)
+from image_safety import (
+    ImageResolutionTooLargeError,
+    UploadTooLargeError,
+    measure_upload_size,
+    process_rss_bytes,
+    validate_image_dimensions,
 )
 from predict import load_ai_pipeline, predict_image_with_pipeline
 from observability import configure_logging, request_observability_middleware
@@ -91,9 +98,25 @@ APP_STORAGE_LIMIT_BYTES = int(
 MIN_SAVE_CONFIDENCE = env_float(
     "MIN_SAVE_CONFIDENCE", 70, minimum=0, maximum=100
 )
-MAX_UPLOAD_SIZE_MB = 5
+MAX_UPLOAD_SIZE_MB = env_int("MAX_UPLOAD_MB", 16, minimum=1, maximum=100)
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+MAX_IMAGE_PIXELS = env_int(
+    "MAX_IMAGE_PIXELS", 25_000_000, minimum=1_000_000, maximum=200_000_000
+)
+MAX_IMAGE_WIDTH = env_int(
+    "MAX_IMAGE_WIDTH", 8_000, minimum=1_000, maximum=50_000
+)
+MAX_IMAGE_HEIGHT = env_int(
+    "MAX_IMAGE_HEIGHT", 8_000, minimum=1_000, maximum=50_000
+)
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+PREDICTION_SEMAPHORE = asyncio.Semaphore(1)
+
+# Pillow checks this while reading image headers. Converting its warning to an
+# exception is scoped to the open operation below so unrelated image work is
+# unaffected.
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
 class UpdateLocationLabelRequest(BaseModel):
@@ -464,9 +487,12 @@ async def predict(
     location_label: str | None = Form(None),
     current_user: dict = Depends(get_current_user),
 ):
-    temp_path = None
+    image = None
+    annotated_image = None
+    prediction_slot_acquired = False
     prediction_started_at = time.perf_counter()
     ai_duration_ms = 0.0
+    rss_before_bytes = None
 
     try:
         enforce_rate_limit(
@@ -511,14 +537,6 @@ async def predict(
 
         location["location_auto_name"] = normalized_auto_name
         location["location_label"] = normalized_location_label
-        contents = await file.read()
-        file_size_bytes = len(contents)
-
-        if file_size_bytes > MAX_UPLOAD_SIZE_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Ukuran gambar terlalu besar. Maksimal {MAX_UPLOAD_SIZE_MB} MB.",
-            )
         if file.content_type not in ALLOWED_IMAGE_TYPES:
             raise HTTPException(
                 status_code=400,
@@ -526,26 +544,74 @@ async def predict(
             )
 
         try:
-            image = ImageOps.exif_transpose(
-                Image.open(io.BytesIO(contents))
-            ).convert("RGB")
-        except Exception:
-            raise HTTPException(status_code=400, detail="File bukan gambar yang valid.")
+            file_size_bytes = await measure_upload_size(
+                file,
+                MAX_UPLOAD_SIZE_BYTES,
+            )
+        except UploadTooLargeError:
+            raise HTTPException(
+                status_code=413,
+                detail="Ukuran foto terlalu besar untuk diproses.",
+            ) from None
 
-        image_width, image_height = image.size
-        suffix = os.path.splitext(file.filename or "")[1].lower()
-        if suffix not in [".jpg", ".jpeg", ".png", ".webp"]:
-            suffix = ".jpg"
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                image = Image.open(file.file)
+            if image.format not in ALLOWED_IMAGE_FORMATS:
+                raise UnidentifiedImageError
+        except (
+            Image.DecompressionBombError,
+            Image.DecompressionBombWarning,
+        ):
+            raise HTTPException(
+                status_code=413,
+                detail="Resolusi foto terlalu besar untuk diproses.",
+            ) from None
+        except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail="File yang dipilih bukan foto yang valid.",
+            ) from None
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            temp_file.write(contents)
-            temp_path = temp_file.name
+        original_width, original_height = image.size
+        try:
+            pixel_count = validate_image_dimensions(
+                original_width,
+                original_height,
+                max_pixels=MAX_IMAGE_PIXELS,
+                max_width=MAX_IMAGE_WIDTH,
+                max_height=MAX_IMAGE_HEIGHT,
+            )
+        except ImageResolutionTooLargeError:
+            raise HTTPException(
+                status_code=413,
+                detail="Resolusi foto terlalu besar untuk diproses.",
+            ) from None
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="File yang dipilih bukan foto yang valid.",
+            ) from None
+
+        await PREDICTION_SEMAPHORE.acquire()
+        prediction_slot_acquired = True
+        rss_before_bytes = process_rss_bytes()
+
+        try:
+            await run_in_threadpool(image.load)
+        except (OSError, SyntaxError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail="File yang dipilih bukan foto yang valid.",
+            ) from None
 
         ai_started_at = time.perf_counter()
         pipeline_result = await run_in_threadpool(
             predict_image_with_pipeline,
             ai_pipeline,
             image,
+            MIN_SAVE_CONFIDENCE,
         )
         ai_duration_ms = (time.perf_counter() - ai_started_at) * 1000
         predicted_class = pipeline_result["predicted_class"]
@@ -553,9 +619,14 @@ async def predict(
         probabilities = pipeline_result["probabilities"]
         annotated_image = pipeline_result["annotated_image"]
         detections = pipeline_result["detections"]
+        summary = pipeline_result["summary"]
+        image_width, image_height = pipeline_result["image_size"]
         response_warnings = location_warnings + sanitize_pipeline_warnings(
             list(pipeline_result["warnings"])
         )
+        del pipeline_result
+        image.close()
+        image = None
 
         normalized_input_source = input_source.strip().lower()
         if normalized_input_source not in {"camera", "gallery", "web_upload"}:
@@ -659,7 +730,12 @@ async def predict(
 
             if storage_available:
                 try:
-                    image_urls = upload_prediction_images(
+                    if annotated_image is None:
+                        raise RuntimeError(
+                            "Annotated image tidak tersedia untuk hasil tersimpan."
+                        )
+                    image_urls = await run_in_threadpool(
+                        upload_prediction_images,
                         image=annotated_image,
                         record_id=record["id"],
                     )
@@ -708,7 +784,7 @@ async def predict(
                 key: round(float(value), 2)
                 for key, value in probabilities.items()
             },
-            "summary": pipeline_result["summary"],
+            "summary": summary,
             "detections": [
                 {
                     **detection,
@@ -739,15 +815,28 @@ async def predict(
             },
             "location": build_location_response(location),
         }
+        if annotated_image is not None:
+            annotated_image.close()
+            annotated_image = None
+        rss_after_bytes = process_rss_bytes()
         logger.info(
             "prediction_completed total_duration_ms=%.2f "
-            "ai_duration_ms=%.2f detection_count=%d history_saved=%s "
-            "storage_saved=%s",
+            "ai_duration_ms=%.2f upload_size_bytes=%d original_width=%d "
+            "original_height=%d pixel_count=%d detection_count=%d "
+            "dino_batch_size=%d history_saved=%s storage_saved=%s "
+            "rss_before_bytes=%s rss_after_bytes=%s",
             (time.perf_counter() - prediction_started_at) * 1000,
             ai_duration_ms,
+            file_size_bytes,
+            original_width,
+            original_height,
+            pixel_count,
             len(detections),
+            ai_pipeline.dino_batch_size,
             should_save_history,
             storage_saved,
+            rss_before_bytes,
+            rss_after_bytes,
         )
         return response_payload
     except HTTPException:
@@ -759,11 +848,13 @@ async def predict(
             detail="Prediction gagal diproses.",
         ) from None
     finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
+        if image is not None:
+            image.close()
+        if annotated_image is not None:
+            annotated_image.close()
+        if prediction_slot_acquired:
+            PREDICTION_SEMAPHORE.release()
+        await file.close()
 
 
 @app.get("/predictions")

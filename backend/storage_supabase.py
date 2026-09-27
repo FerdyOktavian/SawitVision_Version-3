@@ -57,20 +57,27 @@ def image_to_webp_bytes(
     max_size: int,
     quality: int,
 ) -> tuple[bytes, tuple[int, int]]:
-    """Memperbaiki orientasi, resize, lalu mengompres gambar ke WebP."""
-    normalized = ImageOps.exif_transpose(image).convert("RGB")
-    normalized.thumbnail((max_size, max_size))
-
-    buffer = BytesIO()
-    normalized.save(
-        buffer,
-        format="WEBP",
-        quality=quality,
-        method=6,
-        optimize=True,
+    """Resize an already-oriented annotation and encode it as WebP."""
+    source = image if image.mode == "RGB" else image.convert("RGB")
+    resized = ImageOps.contain(
+        source,
+        (max_size, max_size),
+        method=Image.Resampling.LANCZOS,
     )
-
-    return buffer.getvalue(), normalized.size
+    try:
+        buffer = BytesIO()
+        resized.save(
+            buffer,
+            format="WEBP",
+            quality=quality,
+            method=6,
+            optimize=True,
+        )
+        return buffer.getvalue(), resized.size
+    finally:
+        resized.close()
+        if source is not image:
+            source.close()
 
 
 def make_storage_paths(record_id: str) -> dict[str, str]:
@@ -152,22 +159,25 @@ def upload_prediction_images(
         quality=82,
     )
 
-    thumbnail_bytes, thumbnail_size = image_to_webp_bytes(
-        image=image,
-        max_size=320,
-        quality=75,
-    )
-
     processed_url = upload_bytes_to_supabase(
         processed_bytes,
         paths["processed_path"],
     )
+    processed_byte_count = len(processed_bytes)
+    del processed_bytes
 
     try:
+        thumbnail_bytes, thumbnail_size = image_to_webp_bytes(
+            image=image,
+            max_size=320,
+            quality=75,
+        )
         thumbnail_url = upload_bytes_to_supabase(
             thumbnail_bytes,
             paths["thumbnail_path"],
         )
+        thumbnail_byte_count = len(thumbnail_bytes)
+        del thumbnail_bytes
     except Exception:
         # Hindari meninggalkan processed image ketika thumbnail gagal.
         try:
@@ -183,8 +193,8 @@ def upload_prediction_images(
         "image_thumbnail_url": thumbnail_url,
         "processed_size": processed_size,
         "thumbnail_size": thumbnail_size,
-        "processed_bytes": len(processed_bytes),
-        "thumbnail_bytes": len(thumbnail_bytes),
+        "processed_bytes": processed_byte_count,
+        "thumbnail_bytes": thumbnail_byte_count,
     }
 
 
