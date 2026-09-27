@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -70,3 +71,39 @@ def process_rss_bytes() -> int | None:
     except (OSError, UnicodeError, ValueError):
         return None
     return None
+
+
+def process_peak_rss_bytes() -> int | None:
+    """Read the process high-water RSS using the standard library."""
+    try:
+        import resource
+
+        peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (ImportError, OSError, ValueError):
+        return None
+
+    # macOS reports bytes; Linux (including Railway containers) reports KiB.
+    return peak_rss if sys.platform == "darwin" else peak_rss * 1024
+
+
+def log_rss_checkpoint(logger: Any, checkpoint: str) -> int | None:
+    """Log current and peak RSS without image, user, or location metadata."""
+    rss_bytes = process_rss_bytes()
+    peak_rss_bytes = process_peak_rss_bytes()
+    rss_mb = rss_bytes / (1024 * 1024) if rss_bytes is not None else None
+    peak_rss_mb = (
+        peak_rss_bytes / (1024 * 1024)
+        if peak_rss_bytes is not None
+        else None
+    )
+    logger.info(
+        "prediction_memory checkpoint=%s rss_mb=%s peak_rss_mb=%s",
+        checkpoint,
+        f"{rss_mb:.2f}" if rss_mb is not None else "unavailable",
+        (
+            f"{peak_rss_mb:.2f}"
+            if peak_rss_mb is not None
+            else "unavailable"
+        ),
+    )
+    return rss_bytes

@@ -27,6 +27,11 @@ SUPABASE_KEY = env_text("SUPABASE_KEY")
 SUPABASE_BUCKET = env_text("SUPABASE_BUCKET", "sawitvision-v3-images")
 logger = logging.getLogger(__name__)
 
+PROCESSED_IMAGE_MAX_SIZE = 1024
+PROCESSED_IMAGE_QUALITY = 82
+THUMBNAIL_IMAGE_MAX_SIZE = 320
+THUMBNAIL_IMAGE_QUALITY = 75
+
 
 @lru_cache(maxsize=1)
 def get_supabase_client() -> Client:
@@ -59,10 +64,15 @@ def image_to_webp_bytes(
 ) -> tuple[bytes, tuple[int, int]]:
     """Resize an already-oriented annotation and encode it as WebP."""
     source = image if image.mode == "RGB" else image.convert("RGB")
-    resized = ImageOps.contain(
-        source,
-        (max_size, max_size),
-        method=Image.Resampling.LANCZOS,
+    resize_required = source.width > max_size or source.height > max_size
+    resized = (
+        ImageOps.contain(
+            source,
+            (max_size, max_size),
+            method=Image.Resampling.LANCZOS,
+        )
+        if resize_required
+        else source
     )
     try:
         buffer = BytesIO()
@@ -75,7 +85,8 @@ def image_to_webp_bytes(
         )
         return buffer.getvalue(), resized.size
     finally:
-        resized.close()
+        if resized is not source:
+            resized.close()
         if source is not image:
             source.close()
 
@@ -155,8 +166,8 @@ def upload_prediction_images(
 
     processed_bytes, processed_size = image_to_webp_bytes(
         image=image,
-        max_size=1024,
-        quality=82,
+        max_size=PROCESSED_IMAGE_MAX_SIZE,
+        quality=PROCESSED_IMAGE_QUALITY,
     )
 
     processed_url = upload_bytes_to_supabase(
@@ -169,8 +180,8 @@ def upload_prediction_images(
     try:
         thumbnail_bytes, thumbnail_size = image_to_webp_bytes(
             image=image,
-            max_size=320,
-            quality=75,
+            max_size=THUMBNAIL_IMAGE_MAX_SIZE,
+            quality=THUMBNAIL_IMAGE_QUALITY,
         )
         thumbnail_url = upload_bytes_to_supabase(
             thumbnail_bytes,

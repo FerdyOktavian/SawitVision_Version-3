@@ -69,6 +69,7 @@ from geocoding import (
 from image_safety import (
     ImageResolutionTooLargeError,
     UploadTooLargeError,
+    log_rss_checkpoint,
     measure_upload_size,
     process_rss_bytes,
     validate_image_dimensions,
@@ -79,6 +80,7 @@ from readiness import build_readiness
 from report_routes import router as report_router
 from security import IS_PRODUCTION, enforce_rate_limit
 from storage_supabase import (
+    PROCESSED_IMAGE_MAX_SIZE,
     SUPABASE_BUCKET,
     SUPABASE_KEY,
     SUPABASE_SERVICE_ROLE_KEY,
@@ -495,6 +497,7 @@ async def predict(
     rss_before_bytes = None
 
     try:
+        log_rss_checkpoint(logger, "predict_start")
         enforce_rate_limit(
             request,
             "predict_user",
@@ -593,10 +596,14 @@ async def predict(
                 status_code=422,
                 detail="File yang dipilih bukan foto yang valid.",
             ) from None
+        log_rss_checkpoint(logger, "after_header_validation")
 
         await PREDICTION_SEMAPHORE.acquire()
         prediction_slot_acquired = True
-        rss_before_bytes = process_rss_bytes()
+        rss_before_bytes = log_rss_checkpoint(
+            logger,
+            "prediction_slot_acquired",
+        )
 
         try:
             await run_in_threadpool(image.load)
@@ -605,6 +612,7 @@ async def predict(
                 status_code=422,
                 detail="File yang dipilih bukan foto yang valid.",
             ) from None
+        log_rss_checkpoint(logger, "after_decode")
 
         ai_started_at = time.perf_counter()
         pipeline_result = await run_in_threadpool(
@@ -612,6 +620,8 @@ async def predict(
             ai_pipeline,
             image,
             MIN_SAVE_CONFIDENCE,
+            PROCESSED_IMAGE_MAX_SIZE,
+            True,
         )
         ai_duration_ms = (time.perf_counter() - ai_started_at) * 1000
         predicted_class = pipeline_result["predicted_class"]
@@ -627,6 +637,7 @@ async def predict(
         del pipeline_result
         image.close()
         image = None
+        log_rss_checkpoint(logger, "after_source_release")
 
         normalized_input_source = input_source.strip().lower()
         if normalized_input_source not in {"camera", "gallery", "web_upload"}:
@@ -734,6 +745,7 @@ async def predict(
                         raise RuntimeError(
                             "Annotated image tidak tersedia untuk hasil tersimpan."
                         )
+                    log_rss_checkpoint(logger, "before_storage")
                     image_urls = await run_in_threadpool(
                         upload_prediction_images,
                         image=annotated_image,
@@ -757,6 +769,7 @@ async def predict(
 
                     storage_saved = True
                     storage_message = "Gambar berhasil disimpan."
+                    log_rss_checkpoint(logger, "after_storage")
 
                 except Exception:
                     logger.exception("prediction_storage_upload_failed")
@@ -818,6 +831,7 @@ async def predict(
         if annotated_image is not None:
             annotated_image.close()
             annotated_image = None
+        log_rss_checkpoint(logger, "predict_end")
         rss_after_bytes = process_rss_bytes()
         logger.info(
             "prediction_completed total_duration_ms=%.2f "

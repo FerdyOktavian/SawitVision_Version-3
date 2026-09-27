@@ -42,6 +42,7 @@ from ai_model_config import (
     resolve_model_path,
 )
 from config_utils import env_bool, env_float, env_int, env_text
+from image_safety import log_rss_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -587,6 +588,7 @@ class AIPipeline:
 
             if not valid_items:
                 continue
+            log_rss_checkpoint(logger, "before_dino_batch")
             try:
                 probability_batch = self._run_dino_batch(tensors)
                 batch_pairs = [
@@ -628,6 +630,7 @@ class AIPipeline:
                         )
             finally:
                 del tensors
+                log_rss_checkpoint(logger, "after_dino_batch")
 
             for item, probability_row in batch_pairs:
                 probability_values = [
@@ -679,8 +682,25 @@ class AIPipeline:
         self,
         image: Image.Image,
         detections: list[dict[str, Any]],
+        max_size: int | None = None,
     ) -> Image.Image:
-        annotated = image.copy()
+        source_width, source_height = image.size
+        should_resize = (
+            max_size is not None
+            and max_size > 0
+            and (source_width > max_size or source_height > max_size)
+        )
+        annotated = (
+            ImageOps.contain(
+                image,
+                (int(max_size), int(max_size)),
+                method=Image.Resampling.LANCZOS,
+            )
+            if should_resize
+            else image.copy()
+        )
+        scale_x = annotated.width / source_width
+        scale_y = annotated.height / source_height
         draw = ImageDraw.Draw(annotated)
         font = self._annotation_font(annotated)
         line_width = max(2, round(min(annotated.size) * 0.004))
@@ -694,7 +714,11 @@ class AIPipeline:
         # Preserve the exact detections[] order used by the API and by the
         # zero-based prediction_detections.detection_index database column.
         for tbs_number, detection in enumerate(detections, start=1):
-            x1, y1, x2, y2 = detection["bbox"]
+            source_x1, source_y1, source_x2, source_y2 = detection["bbox"]
+            x1 = round(float(source_x1) * scale_x)
+            y1 = round(float(source_y1) * scale_y)
+            x2 = round(float(source_x2) * scale_x)
+            y2 = round(float(source_y2) * scale_y)
             class_name = str(detection["predicted_class"])
             color = ANNOTATION_COLORS.get(class_name, "#FFFFFF")
             display_class_name = display_class_names.get(
@@ -768,10 +792,26 @@ class AIPipeline:
         transposed.close()
         return converted, True
 
+    def _release_detector_request_state(self) -> None:
+        """Drop full-resolution request buffers retained by Ultralytics."""
+        predictor = getattr(self.detector, "predictor", None)
+        if predictor is None:
+            return
+        for attribute in (
+            "batch",
+            "dataset",
+            "results",
+            "plotted_img",
+        ):
+            if hasattr(predictor, attribute):
+                setattr(predictor, attribute, None)
+
     def predict(
         self,
         image: Image.Image,
         annotation_min_confidence: float | None = None,
+        annotation_max_size: int | None = None,
+        consume_input: bool = False,
     ) -> dict[str, Any]:
         """Run YOLO -> clamped crops -> DINO and return one image result."""
         if not isinstance(image, Image.Image):
@@ -779,12 +819,19 @@ class AIPipeline:
         normalized_image, owns_normalized_image = self._normalize_source_image(
             image
         )
-        if normalized_image.width <= 0 or normalized_image.height <= 0:
-            raise AIPipelineError("Dimensi gambar tidak valid.")
+        if owns_normalized_image:
+            log_rss_checkpoint(logger, "after_rgb_copy")
+            if consume_input:
+                image.close()
+        log_rss_checkpoint(logger, "after_rgb")
 
         try:
+            if normalized_image.width <= 0 or normalized_image.height <= 0:
+                raise AIPipelineError("Dimensi gambar tidak valid.")
             with self._inference_lock, torch.inference_mode():
+                yolo_results = None
                 try:
+                    log_rss_checkpoint(logger, "before_yolo")
                     yolo_results = self.detector.predict(
                         source=normalized_image,
                         imgsz=self.yolo_imgsz,
@@ -793,22 +840,29 @@ class AIPipeline:
                         device=str(self.device),
                         verbose=False,
                     )
+                    log_rss_checkpoint(logger, "after_yolo")
+
+                    if len(yolo_results) != 1:
+                        raise AIPipelineError(
+                            "YOLO harus mengembalikan tepat satu result untuk "
+                            f"satu gambar; diterima {len(yolo_results)}."
+                        )
+
+                    prepared, warnings = self._prepare_crops(
+                        normalized_image,
+                        yolo_results[0].boxes,
+                    )
                 except Exception as error:
+                    if isinstance(error, AIPipelineError):
+                        raise
                     raise AIPipelineError(
                         f"YOLO inference gagal: {type(error).__name__}: {error}"
                     ) from error
+                finally:
+                    yolo_results = None
+                    self._release_detector_request_state()
+                    log_rss_checkpoint(logger, "after_yolo_release")
 
-                if len(yolo_results) != 1:
-                    raise AIPipelineError(
-                        "YOLO harus mengembalikan tepat satu result untuk satu "
-                        f"gambar; diterima {len(yolo_results)}."
-                    )
-
-                prepared, warnings = self._prepare_crops(
-                    normalized_image,
-                    yolo_results[0].boxes,
-                )
-                del yolo_results
                 # Explicitly avoid DINO when no valid crop exists.
                 detections = (
                     self._classify_prepared(
@@ -820,6 +874,7 @@ class AIPipeline:
                     else []
                 )
                 del prepared
+                log_rss_checkpoint(logger, "after_dino")
 
             compatibility = summarize_detections(detections)
             should_annotate = (
@@ -830,11 +885,17 @@ class AIPipeline:
                     >= float(annotation_min_confidence)
                 )
             )
+            log_rss_checkpoint(logger, "before_annotation")
             annotated_image = (
-                self.annotate_image(normalized_image, detections)
+                self.annotate_image(
+                    normalized_image,
+                    detections,
+                    max_size=annotation_max_size,
+                )
                 if should_annotate
                 else None
             )
+            log_rss_checkpoint(logger, "after_annotation")
             return {
                 **compatibility,
                 "detections": detections,
@@ -843,5 +904,5 @@ class AIPipeline:
                 "image_size": normalized_image.size,
             }
         finally:
-            if owns_normalized_image:
+            if owns_normalized_image or consume_input:
                 normalized_image.close()
