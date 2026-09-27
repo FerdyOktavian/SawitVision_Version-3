@@ -14,7 +14,7 @@ coordinates, database URLs, or signed URLs into tickets/log notes.
 - [ ] Both responses include a safe `X-Request-ID`.
 - [ ] Model acquisition completes or uses the mounted cache as expected.
 - [ ] Both model SHA-256 checks report success.
-- [ ] A restart reuses valid cached models when a `/models` volume is used.
+- [ ] A restart reuses valid cached models when an `/app/models` volume is used.
 
 ## Database
 
