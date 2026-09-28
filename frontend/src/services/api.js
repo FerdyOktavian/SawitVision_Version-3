@@ -501,7 +501,7 @@ export async function downloadAdminPredictionReport({
     );
 
   let filename =
-    "Laporan_Global_SawitVision_V3.xlsx";
+    "Laporan_Global_SawitVision.xlsx";
 
   const filenameMatch =
     contentDisposition?.match(

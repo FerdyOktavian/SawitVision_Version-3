@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getCurrentUser,
   logoutUser,
@@ -6,6 +6,16 @@ import {
   updateProfile,
   deleteMyAccount,
 } from "../services/api";
+import Alert from "../components/ui/Alert";
+import Button from "../components/ui/Button";
+import Card from "../components/ui/Card";
+import FormField from "../components/ui/FormField";
+import Icon from "../components/ui/Icon";
+import LoadingState from "../components/ui/LoadingState";
+import Modal from "../components/ui/Modal";
+import PageHeader from "../components/ui/PageHeader";
+import SegmentedControl from "../components/ui/SegmentedControl";
+import { getStoredTheme, saveTheme } from "../utils/theme";
 
 function normalizePhone(value = "") {
   return String(value).replace(/[^\d+]/g, "");
@@ -16,16 +26,21 @@ function resolveUser(response) {
 }
 
 function ProfilePage({ currentUser, onUserUpdated, onLogout }) {
+  const currentUserRef = useRef(currentUser);
+  const onUserUpdatedRef = useRef(onUserUpdated);
   const [profile, setProfile] = useState(null);
   const [fullName, setFullName] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
-
+  const [fieldErrors, setFieldErrors] = useState({});
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-
+  const [showLogoutDialog, setShowLogoutDialog] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState("success");
+  const [theme, setTheme] = useState(() => getStoredTheme());
 
   useEffect(() => {
     let mounted = true;
@@ -36,12 +51,9 @@ function ProfilePage({ currentUser, onUserUpdated, onLogout }) {
 
       try {
         const response = await getCurrentUser();
-
         const user = resolveUser(response);
 
-        if (!mounted) {
-          return;
-        }
+        if (!mounted) return;
 
         setProfile(user);
         setFullName(user?.full_name || "");
@@ -49,32 +61,25 @@ function ProfilePage({ currentUser, onUserUpdated, onLogout }) {
 
         if (user) {
           saveStoredUser(user);
-          onUserUpdated?.(user);
+          onUserUpdatedRef.current?.(user);
         }
       } catch (error) {
-        if (!mounted) {
-          return;
-        }
+        if (!mounted) return;
 
-        if (currentUser) {
-          setProfile(currentUser);
-
-          setFullName(currentUser?.full_name || "");
-
-          setPhoneNumber(currentUser?.phone_number || "");
+        if (currentUserRef.current) {
+          setProfile(currentUserRef.current);
+          setFullName(currentUserRef.current?.full_name || "");
+          setPhoneNumber(currentUserRef.current?.phone_number || "");
         } else {
           setMessageType("error");
           setMessage(error.message || "Profil gagal dimuat.");
         }
       } finally {
-        if (mounted) {
-          setIsLoading(false);
-        }
+        if (mounted) setIsLoading(false);
       }
     }
 
     loadProfile();
-
     return () => {
       mounted = false;
     };
@@ -82,7 +87,6 @@ function ProfilePage({ currentUser, onUserUpdated, onLogout }) {
 
   const initials = useMemo(() => {
     const name = profile?.full_name || fullName || "Pengguna";
-
     return name
       .split(/\s+/)
       .filter(Boolean)
@@ -91,39 +95,41 @@ function ProfilePage({ currentUser, onUserUpdated, onLogout }) {
       .join("");
   }, [profile?.full_name, fullName]);
 
-  const hasChanges = useMemo(() => {
+  const isDirty = useMemo(() => {
     const storedName = profile?.full_name || "";
-
     const storedPhone = profile?.phone_number || "";
-
     return (
       fullName.trim() !== storedName.trim() ||
       normalizePhone(phoneNumber) !== normalizePhone(storedPhone)
     );
   }, [fullName, phoneNumber, profile]);
 
+  const handleCancelEdit = () => {
+    setFullName(profile?.full_name || "");
+    setPhoneNumber(profile?.phone_number || "");
+    setFieldErrors({});
+    setMessage("");
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
-
     setMessage("");
+    setFieldErrors({});
 
     const cleanName = fullName.trim();
-
     const cleanPhone = normalizePhone(phoneNumber);
 
     if (cleanName.length < 2) {
+      setFieldErrors({ fullName: "Nama minimal terdiri dari 2 karakter." });
       setMessageType("error");
-
       setMessage("Nama minimal terdiri dari 2 karakter.");
-
       return;
     }
 
     if (cleanPhone.length < 8) {
+      setFieldErrors({ phoneNumber: "Nomor telepon belum valid." });
       setMessageType("error");
-
       setMessage("Nomor telepon belum valid.");
-
       return;
     }
 
@@ -134,34 +140,22 @@ function ProfilePage({ currentUser, onUserUpdated, onLogout }) {
         full_name: cleanName,
         phone_number: cleanPhone,
       });
-
-      // Ambil ulang dari backend agar data yang
-      // tampil benar-benar sama dengan database.
       const freshResponse = await getCurrentUser();
-
       const updatedUser = resolveUser(freshResponse);
 
       if (!updatedUser) {
         throw new Error("Data pengguna terbaru tidak ditemukan.");
       }
 
-      // Sinkronkan seluruh state profil.
       setProfile(updatedUser);
       setFullName(updatedUser.full_name || cleanName);
       setPhoneNumber(updatedUser.phone_number || cleanPhone);
-
-      // Sinkronkan localStorage.
       saveStoredUser(updatedUser);
-
-      // Sinkronkan currentUser di App.jsx
-      // supaya header ikut berubah.
       onUserUpdated?.(updatedUser);
-
       setMessageType("success");
       setMessage("Profil berhasil diperbarui dan disimpan.");
     } catch (error) {
       setMessageType("error");
-
       setMessage(error.message || "Profil gagal diperbarui.");
     } finally {
       setIsSaving(false);
@@ -169,12 +163,7 @@ function ProfilePage({ currentUser, onUserUpdated, onLogout }) {
   };
 
   const handleLogout = async () => {
-    const confirmed = window.confirm("Keluar dari akun SawitVision?");
-
-    if (!confirmed) {
-      return;
-    }
-
+    setIsLoggingOut(true);
     try {
       await logoutUser();
     } finally {
@@ -183,218 +172,284 @@ function ProfilePage({ currentUser, onUserUpdated, onLogout }) {
   };
 
   const handleDeleteAccount = async () => {
-    const firstConfirmed = window.confirm(
-      "Hapus akun SawitVision secara permanen? Seluruh riwayat prediksi dan gambar milik akun ini juga akan dihapus.",
-    );
-
-    if (!firstConfirmed) {
-      return;
-    }
-
-    const finalConfirmed = window.confirm(
-      "Konfirmasi terakhir: tindakan ini tidak dapat dibatalkan. Tetap hapus akun?",
-    );
-
-    if (!finalConfirmed) {
-      return;
-    }
-
     setIsDeleting(true);
     setMessage("");
 
     try {
       await deleteMyAccount();
-
       await logoutUser();
-
       onLogout?.();
     } catch (error) {
       setMessageType("error");
       setMessage(error.message || "Akun gagal dihapus.");
       setIsDeleting(false);
+      setShowDeleteDialog(false);
     }
+  };
+
+  const closeLogoutDialog = () => {
+    if (!isLoggingOut) setShowLogoutDialog(false);
+  };
+
+  const closeDeleteDialog = () => {
+    if (!isDeleting) setShowDeleteDialog(false);
   };
 
   if (isLoading) {
     return (
       <main className="profile-page">
-        <section className="profile-loading">
-          <div className="profile-spinner" />
-          <h2>Memuat profil...</h2>
-          <p>Tunggu sebentar, data akun sedang disiapkan.</p>
-        </section>
+        <PageHeader
+          eyebrow="Akun"
+          title="Profil"
+          description="Kelola informasi akun dan sesi SawitVision Anda."
+        />
+        <Card className="profile-loading-card">
+          <LoadingState
+            title="Memuat profil..."
+            description="Tunggu sebentar, data akun sedang disiapkan."
+          />
+        </Card>
       </main>
     );
   }
 
+  const profileStatus = profile?.status;
+  const isBusy = isSaving || isDeleting || isLoggingOut;
+
   return (
     <main className="profile-page">
-      <section className="profile-hero">
-        <div className="profile-avatar">{initials}</div>
+      <PageHeader
+        eyebrow="Akun"
+        title="Profil"
+        description="Periksa identitas akun, perbarui informasi login, dan kelola sesi Anda."
+      />
 
-        <div className="profile-hero-copy">
-          <span className="profile-eyebrow">Profil pengguna</span>
-
-          <h1>{profile?.full_name || "Pengguna SawitVision"}</h1>
-
-          <p>
-            Kelola nama dan nomor telepon yang digunakan untuk masuk ke
-            aplikasi.
-          </p>
+      <Card className="profile-identity" aria-labelledby="profile-identity-title">
+        <div className="profile-avatar" aria-hidden="true">{initials}</div>
+        <div className="profile-identity__primary">
+          <p id="profile-identity-title">Identitas akun</p>
+          <h2>{profile?.full_name || "Pengguna SawitVision"}</h2>
+          <span>{profile?.phone_number || "Nomor telepon belum tersedia"}</span>
         </div>
-
-        <div className="profile-status">
-          <span />
-          Akun aktif
-        </div>
-      </section>
-
-      <section className="profile-layout">
-        <section className="profile-main-card">
-          <div className="profile-section-title">
-            <span>Informasi akun</span>
-            <h2>Data pengguna</h2>
+        <dl className="profile-identity__metadata">
+          <div>
+            <dt>Peran</dt>
+            <dd>{profile?.role === "admin" ? "Administrator" : "Pengguna"}</dd>
           </div>
+          {profileStatus && (
+            <div>
+              <dt>Status</dt>
+              <dd>{profileStatus}</dd>
+            </div>
+          )}
+        </dl>
+      </Card>
 
-          <form className="profile-form" onSubmit={handleSubmit}>
-            <label>
-              <span>Nama lengkap</span>
+      <div className="profile-layout">
+        <Card className="profile-section profile-editor" aria-labelledby="profile-editor-title">
+          <header className="profile-section__header">
+            <div>
+              <p>Informasi profil</p>
+              <h2 id="profile-editor-title">Data pengguna</h2>
+            </div>
+          </header>
 
-              <div className="profile-input-wrap">
-                <i>👤</i>
+          <form className="profile-form" onSubmit={handleSubmit} noValidate>
+            <FormField
+              id="profile-full-name"
+              label="Nama lengkap"
+              hint="Nama ini ditampilkan sebagai identitas akun Anda."
+              error={fieldErrors.fullName}
+              type="text"
+              value={fullName}
+              onChange={(event) => {
+                setFullName(event.target.value);
+                setFieldErrors((errors) => ({ ...errors, fullName: undefined }));
+              }}
+              placeholder="Masukkan nama"
+              autoComplete="name"
+              disabled={isBusy}
+              required
+            />
 
-                <input
-                  type="text"
-                  value={fullName}
-                  onChange={(event) => setFullName(event.target.value)}
-                  placeholder="Masukkan nama"
-                  autoComplete="name"
-                />
-              </div>
-
-              <small>
-                Nama dapat diubah dan perubahan akan disimpan sebagai data akun
-                terbaru.
-              </small>
-            </label>
-
-            <label>
-              <span>Nomor telepon</span>
-
-              <div className="profile-input-wrap">
-                <i>📱</i>
-
-                <input
-                  type="tel"
-                  value={phoneNumber}
-                  onChange={(event) => setPhoneNumber(event.target.value)}
-                  placeholder="Contoh: 081234567890"
-                  inputMode="tel"
-                  autoComplete="tel"
-                />
-              </div>
-
-              <small>
-                Nomor telepon yang baru akan digunakan untuk login berikutnya.
-              </small>
-            </label>
+            <FormField
+              id="profile-phone-number"
+              label="Nomor telepon"
+              hint="Nomor baru akan digunakan untuk login berikutnya."
+              error={fieldErrors.phoneNumber}
+              type="tel"
+              value={phoneNumber}
+              onChange={(event) => {
+                setPhoneNumber(event.target.value);
+                setFieldErrors((errors) => ({ ...errors, phoneNumber: undefined }));
+              }}
+              placeholder="Contoh: 081234567890"
+              inputMode="tel"
+              autoComplete="tel"
+              disabled={isBusy}
+              required
+            />
 
             {message && (
-              <div className={`profile-message ${messageType}`}>
-                {messageType === "success" ? "✓" : "⚠️"} {message}
-              </div>
+              <Alert tone={messageType} role={messageType === "error" ? "alert" : "status"}>
+                {message}
+              </Alert>
             )}
 
-            <button
-              type="submit"
-              className="profile-save-button"
-              disabled={!hasChanges || isSaving}
-            >
-              {isSaving ? "Menyimpan perubahan..." : "Simpan perubahan"}
-            </button>
+            <div className="profile-form__actions">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handleCancelEdit}
+                disabled={!isDirty || isBusy}
+              >
+                Batalkan
+              </Button>
+              <Button type="submit" disabled={!isDirty || isBusy}>
+                <Icon name="check" size={18} />
+                {isSaving ? "Menyimpan..." : "Simpan perubahan"}
+              </Button>
+            </div>
           </form>
-        </section>
+        </Card>
 
-        <aside className="profile-side">
-          <section className="profile-info-card">
-            <div className="profile-card-icon">🔄</div>
+        <aside className="profile-actions" aria-label="Tindakan akun">
+          <Card className="profile-section profile-appearance" aria-labelledby="profile-appearance-title">
+            <header className="profile-section__header">
+              <div>
+                <p>Tampilan</p>
+                <h2 id="profile-appearance-title">Tema</h2>
+              </div>
+            </header>
+            <p className="profile-section__description">
+              Atur tampilan SawitVision di perangkat ini.
+            </p>
+            <SegmentedControl
+              value={theme}
+              onChange={(nextTheme) => setTheme(saveTheme(nextTheme))}
+              label="Pilih tema tampilan"
+              options={[
+                { value: "light", label: "Terang" },
+                { value: "dark", label: "Gelap" },
+              ]}
+            />
+          </Card>
 
-            <div>
-              <h3>Data selalu tersinkron</h3>
-              <p>
-                Setelah disimpan, nama dan nomor telepon pada profil akan
-                mengikuti data terbaru di database.
-              </p>
-            </div>
-          </section>
-
-          <section className="profile-info-card">
-            <div className="profile-card-icon">📲</div>
-
-            <div>
-              <h3>Nomor telepon penting</h3>
-              <p>
-                Nomor yang baru akan menjadi nomor login untuk penggunaan
-                berikutnya.
-              </p>
-            </div>
-          </section>
-
-          <section className="profile-account-card">
-            <span>Akun saat ini</span>
-
-            <div>
-              <small>Nama</small>
-
-              <strong>{profile?.full_name || "-"}</strong>
-            </div>
-
-            <div>
-              <small>Nomor telepon</small>
-
-              <strong>{profile?.phone_number || "-"}</strong>
-            </div>
-
-            <div>
-              <small>Peran</small>
-
-              <strong>
-                {profile?.role === "admin" ? "Administrator" : "Pengguna"}
-              </strong>
-            </div>
-          </section>
+          <Card className="profile-section profile-session" aria-labelledby="profile-session-title">
+            <header className="profile-section__header">
+              <div>
+                <p>Sesi</p>
+                <h2 id="profile-session-title">Akses akun</h2>
+              </div>
+              <Icon name="logout" size={20} />
+            </header>
+            <p className="profile-section__description">
+              Keluar dengan aman dari akun yang sedang digunakan di perangkat ini.
+            </p>
+            <Button
+              type="button"
+              variant="secondary"
+              block
+              onClick={() => setShowLogoutDialog(true)}
+              disabled={isBusy}
+            >
+              <Icon name="logout" size={18} />
+              Keluar dari akun
+            </Button>
+          </Card>
 
           {profile?.role !== "admin" && (
-            <section className="profile-danger-card">
-              <div className="profile-danger-copy">
-                <strong>Hapus akun</strong>
-                <p>
-                  Akun, seluruh riwayat klasifikasi, dan gambar prediksi akan
-                  dihapus permanen dan tidak dapat dipulihkan.
-                </p>
+            <section className="profile-danger" aria-labelledby="profile-danger-title">
+              <div className="profile-danger__heading">
+                <Icon name="warning" size={20} />
+                <div>
+                  <p>Tindakan berisiko</p>
+                  <h2 id="profile-danger-title">Hapus akun</h2>
+                </div>
               </div>
-
-              <button
+              <p>
+                Data akun akan dihapus sesuai proses yang berlaku saat ini. Tindakan ini tidak dapat dibatalkan.
+              </p>
+              <Button
                 type="button"
-                className="profile-delete-button"
-                onClick={handleDeleteAccount}
-                disabled={isDeleting}
+                variant="danger"
+                block
+                onClick={() => setShowDeleteDialog(true)}
+                disabled={isBusy}
               >
-                {isDeleting ? "Menghapus akun..." : "🗑️ Hapus akun"}
-              </button>
+                <Icon name="trash" size={18} />
+                Hapus akun
+              </Button>
             </section>
           )}
+        </aside>
+      </div>
 
-          <button
+      <Modal
+        open={showLogoutDialog}
+        onClose={closeLogoutDialog}
+        title="Keluar dari akun?"
+        eyebrow="Konfirmasi sesi"
+        closeOnBackdrop={!isLoggingOut}
+        className="profile-confirmation-modal"
+      >
+        <p className="profile-dialog-copy">
+          Anda perlu masuk kembali untuk menggunakan SawitVision.
+        </p>
+        <div className="profile-dialog-actions">
+          <Button
             type="button"
-            className="profile-logout-button"
-            onClick={handleLogout}
+            variant="secondary"
+            onClick={closeLogoutDialog}
+            disabled={isLoggingOut}
+            data-autofocus
+          >
+            Batal
+          </Button>
+          <Button type="button" onClick={handleLogout} disabled={isLoggingOut}>
+            <Icon name="logout" size={18} />
+            {isLoggingOut ? "Sedang keluar..." : "Keluar"}
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={showDeleteDialog}
+        onClose={closeDeleteDialog}
+        title="Hapus akun secara permanen?"
+        eyebrow="Tindakan permanen"
+        role="alertdialog"
+        closeOnBackdrop={!isDeleting}
+        className="profile-confirmation-modal profile-delete-modal"
+      >
+        <Alert tone="warning">
+          Data akun akan dihapus sesuai proses backend yang berlaku saat ini. Tindakan ini tidak dapat dibatalkan.
+        </Alert>
+        <p className="profile-dialog-copy">
+          Pastikan Anda memang ingin menghapus akun <strong>{profile?.full_name || "ini"}</strong> sebelum melanjutkan.
+        </p>
+        <div className="profile-dialog-actions">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={closeDeleteDialog}
+            disabled={isDeleting}
+            data-autofocus
+          >
+            Batal
+          </Button>
+          <Button
+            type="button"
+            variant="danger"
+            className="profile-delete-confirm"
+            onClick={handleDeleteAccount}
             disabled={isDeleting}
           >
-            🚪 Keluar dari akun
-          </button>
-        </aside>
-      </section>
+            <Icon name="trash" size={18} />
+            {isDeleting ? "Menghapus akun..." : "Hapus akun"}
+          </Button>
+        </div>
+      </Modal>
     </main>
   );
 }

@@ -1,340 +1,234 @@
-import { useMemo } from "react";
+import { useState } from "react";
+import Alert from "../components/ui/Alert";
+import Button from "../components/ui/Button";
+import Card from "../components/ui/Card";
+import Icon from "../components/ui/Icon";
+import PageHeader from "../components/ui/PageHeader";
+import MaturityBadge from "../components/MaturityBadge";
+import SocialLinks from "../components/SocialLinks";
+
+const creatorImageModules = import.meta.glob(
+  "../assets/muhammad-ferdy-oktavian.jpeg",
+  { eager: true, query: "?url", import: "default" },
+);
+const CREATOR_IMAGE_URL =
+  creatorImageModules["../assets/muhammad-ferdy-oktavian.jpeg"] || "";
+
+const WORKFLOW = [
+  {
+    title: "Siapkan foto",
+    description: "Ambil foto baru atau pilih gambar TBS dari galeri perangkat.",
+  },
+  {
+    title: "Deteksi TBS",
+    description: "Sistem mencari dan memisahkan setiap TBS yang terlihat pada foto.",
+  },
+  {
+    title: "Klasifikasi kematangan",
+    description: "Setiap TBS yang terdeteksi dianalisis ke salah satu dari tiga kelas.",
+  },
+  {
+    title: "Tinjau hasil",
+    description: "Hasil, gambar, dan lokasi yang tersedia disimpan dalam riwayat.",
+  },
+];
 
 const MATURITY_CLASSES = [
   {
     key: "belum_masak",
-    icon: "🟢",
-    title: "Belum Matang",
-    description:
-      "Buah masih belum mencapai tingkat kematangan optimal untuk dipanen.",
-    hint:
-      "Warna buah cenderung lebih muda dan ciri kematangan belum terlihat maksimal.",
+    description: "TBS diklasifikasikan belum mencapai tingkat kematangan untuk diprioritaskan saat panen.",
   },
   {
     key: "masak",
-    icon: "🟠",
-    title: "Matang",
-    description:
-      "Buah berada pada tingkat kematangan yang sesuai untuk dipanen.",
-    hint:
-      "Warna buah terlihat lebih matang dan karakteristik buah sudah lebih jelas.",
+    description: "TBS diklasifikasikan berada pada tingkat kematangan yang sesuai untuk dipertimbangkan saat panen.",
   },
   {
     key: "terlalu_masak",
-    icon: "🔴",
-    title: "Terlalu Matang",
-    description:
-      "Buah telah melewati tingkat kematangan optimal.",
-    hint:
-      "Warna buah cenderung lebih tua dan beberapa bagian dapat terlihat semakin matang.",
+    description: "TBS diklasifikasikan telah melewati tingkat kematangan optimal.",
   },
 ];
 
-const HOW_TO_USE = [
-  {
-    number: "01",
-    icon: "📸",
-    title: "Ambil foto buah",
-    text:
-      "Gunakan kamera atau pilih gambar dari galeri. Pastikan buah kelapa sawit terlihat jelas.",
-  },
-  {
-    number: "02",
-    icon: "☀️",
-    title: "Pastikan foto terang",
-    text:
-      "Hindari foto terlalu gelap, terlalu silau, atau buram agar ciri buah dapat terlihat dengan baik.",
-  },
-  {
-    number: "03",
-    icon: "✨",
-    title: "Mulai klasifikasi",
-    text:
-      "Tekan tombol klasifikasi dan tunggu beberapa saat sampai sistem selesai menganalisis gambar.",
-  },
-  {
-    number: "04",
-    icon: "📊",
-    title: "Baca hasil",
-    text:
-      "Lihat kelas kematangan dan persentase keyakinan AI yang ditampilkan oleh sistem.",
-  },
+const CAPABILITIES = [
+  { icon: "scan", label: "Deteksi beberapa TBS dalam satu foto" },
+  { icon: "leaf", label: "Klasifikasi tiga kelas kematangan" },
+  { icon: "history", label: "Penyimpanan hasil dan riwayat analisis" },
+  { icon: "location", label: "Pencatatan lokasi pengambilan bila tersedia" },
 ];
 
-function AboutPage({
-  currentUser,
-  onStartPrediction,
-  onOpenHistory,
-}) {
-  const userName = useMemo(() => {
-    return (
-      currentUser?.full_name ||
-      currentUser?.name ||
-      "Pengguna"
-    );
-  }, [currentUser]);
+function AboutPage({ onStartPrediction, onOpenHistory }) {
+  const [creatorImageFailed, setCreatorImageFailed] = useState(false);
+  const showCreatorImage = Boolean(CREATOR_IMAGE_URL && !creatorImageFailed);
 
   return (
     <main className="about-page">
-      <section className="about-hero">
-        <div className="about-hero-copy">
-          <span className="about-eyebrow">
-            Tentang SawitVision
-          </span>
+      <PageHeader
+        eyebrow="Tentang"
+        title="Tentang SawitVision"
+        description="Sistem bantu analisis kematangan tandan buah segar kelapa sawit dari foto."
+      />
 
-          <h1>
-            Membantu mengenali tingkat kematangan
-            buah kelapa sawit dengan AI
-          </h1>
-
+      <Card className="about-overview">
+        <div className="about-overview__mark" aria-hidden="true">
+          <Icon name="leaf" size={30} />
+        </div>
+        <div className="about-overview__content">
+          <h2>Informasi pendukung untuk pemeriksaan TBS</h2>
           <p>
-            SawitVision dirancang agar proses
-            klasifikasi dapat dilakukan dengan
-            langkah sederhana melalui foto buah
-            kelapa sawit.
+            SawitVision membantu petugas lapangan mengenali TBS pada gambar,
+            meninjau hasil kematangan per TBS, dan menyimpan catatan analisis
+            dalam satu alur kerja.
           </p>
-
-          <div className="about-hero-actions">
-            <button
-              type="button"
-              className="about-primary-button"
-              onClick={onStartPrediction}
-            >
-              📷 Mulai klasifikasi
-            </button>
-
-            <button
-              type="button"
-              className="about-secondary-button"
-              onClick={onOpenHistory}
-            >
-              🕘 Lihat riwayat
-            </button>
+          <div className="about-overview__actions">
+            <Button type="button" onClick={onStartPrediction}>
+              <Icon name="camera" size={18} />
+              Mulai prediksi
+            </Button>
+            <Button type="button" variant="secondary" onClick={onOpenHistory}>
+              <Icon name="history" size={18} />
+              Lihat riwayat
+            </Button>
           </div>
         </div>
+      </Card>
 
-        <div className="about-hero-visual">
-          <div className="about-hero-icon">
-            🌴
-          </div>
-
-          <div className="about-ai-badge">
-            <strong>AI</strong>
-            <span>EfficientNetV2S</span>
-          </div>
-        </div>
-      </section>
-
-      <section className="about-welcome-card">
-        <div className="about-welcome-icon">
-          👋
-        </div>
-
-        <div>
-          <span>Halo, {userName}</span>
-          <h2>
-            Gunakan SawitVision dengan langkah yang
-            sederhana
-          </h2>
-          <p>
-            Tidak perlu memahami istilah teknis AI.
-            Cukup siapkan foto buah yang jelas,
-            kemudian ikuti petunjuk penggunaan di
-            bawah.
-          </p>
-        </div>
-      </section>
-
-      <section className="about-section">
-        <header className="about-section-heading">
-          <span>Petunjuk penggunaan</span>
-          <h2>Cara menggunakan SawitVision</h2>
-          <p>
-            Empat langkah berikut dapat digunakan
-            setiap kali ingin melakukan klasifikasi.
-          </p>
+      <section className="about-section" aria-labelledby="about-capabilities-title">
+        <header className="about-section__heading">
+          <p>Fungsi utama</p>
+          <h2 id="about-capabilities-title">Apa yang dilakukan SawitVision</h2>
         </header>
-
-        <div className="about-steps-grid">
-          {HOW_TO_USE.map((step) => (
-            <article
-              key={step.number}
-              className="about-step-card"
-            >
-              <div className="about-step-top">
-                <span className="about-step-number">
-                  {step.number}
-                </span>
-
-                <span className="about-step-icon">
-                  {step.icon}
-                </span>
-              </div>
-
-              <h3>{step.title}</h3>
-              <p>{step.text}</p>
-            </article>
+        <Card className="about-capability-list">
+          {CAPABILITIES.map((item) => (
+            <div className="about-capability" key={item.label}>
+              <span aria-hidden="true"><Icon name={item.icon} size={20} /></span>
+              <p>{item.label}</p>
+            </div>
           ))}
-        </div>
+        </Card>
       </section>
 
-      <section className="about-photo-guide">
-        <div className="about-photo-copy">
-          <span className="about-eyebrow dark">
-            Foto yang baik
-          </span>
-
-          <h2>
-            Hasil klasifikasi sangat dipengaruhi
-            kualitas gambar
-          </h2>
-
-          <p>
-            Gunakan gambar yang memperlihatkan buah
-            secara jelas agar model dapat membaca
-            karakteristik visual dengan lebih baik.
-          </p>
-        </div>
-
-        <div className="about-photo-tips">
-          <article className="good">
-            <span>✓</span>
-            <div>
-              <strong>Disarankan</strong>
-              <p>
-                Buah terlihat jelas, cukup dekat,
-                pencahayaan baik, dan tidak buram.
-              </p>
-            </div>
-          </article>
-
-          <article className="bad">
-            <span>×</span>
-            <div>
-              <strong>Hindari</strong>
-              <p>
-                Foto terlalu gelap, jauh, tertutup,
-                sangat miring, atau tidak fokus.
-              </p>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section className="about-section">
-        <header className="about-section-heading">
-          <span>Kelas kematangan</span>
-          <h2>Tiga hasil yang dapat muncul</h2>
-          <p>
-            SawitVision mengelompokkan gambar buah
-            kelapa sawit ke dalam tiga kelas.
-          </p>
+      <section className="about-section" aria-labelledby="about-workflow-title">
+        <header className="about-section__heading">
+          <p>Alur penggunaan</p>
+          <h2 id="about-workflow-title">Cara kerja sederhana</h2>
         </header>
+        <Card as="ol" className="about-workflow">
+          {WORKFLOW.map((step, index) => (
+            <li key={step.title}>
+              <span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+              <div>
+                <h3>{step.title}</h3>
+                <p>{step.description}</p>
+              </div>
+            </li>
+          ))}
+        </Card>
+      </section>
 
-        <div className="about-class-grid">
+      <section className="about-section" aria-labelledby="about-maturity-title">
+        <header className="about-section__heading">
+          <p>Hasil analisis</p>
+          <h2 id="about-maturity-title">Tiga kelas kematangan</h2>
+        </header>
+        <div className="about-maturity-grid">
           {MATURITY_CLASSES.map((item) => (
-            <article
-              key={item.key}
-              className={`about-class-card ${item.key}`}
-            >
-              <div className="about-class-icon">
-                {item.icon}
-              </div>
-
-              <h3>{item.title}</h3>
+            <Card as="article" className="about-maturity-card" key={item.key}>
+              <MaturityBadge value={item.key} />
               <p>{item.description}</p>
-
-              <div className="about-class-hint">
-                <span>Petunjuk visual</span>
-                <small>{item.hint}</small>
-              </div>
-            </article>
+            </Card>
           ))}
         </div>
       </section>
 
-      <section className="about-confidence">
-        <div className="about-confidence-icon">
-          📈
-        </div>
-
-        <div className="about-confidence-copy">
-          <span className="about-eyebrow dark">
-            Memahami hasil
+      <section className="about-section" aria-labelledby="about-technology-title">
+        <header className="about-section__heading">
+          <p>Teknologi</p>
+          <h2 id="about-technology-title">Dua tahap analisis gambar</h2>
+          <span>
+            Sistem memisahkan proses pencarian TBS dan penentuan kelas
+            kematangan agar hasil dapat ditampilkan per deteksi.
           </span>
-
-          <h2>Apa arti keyakinan AI?</h2>
-
-          <p>
-            Persentase keyakinan menunjukkan seberapa
-            kuat model memilih suatu kelas berdasarkan
-            gambar yang diberikan. Nilai yang lebih
-            tinggi menunjukkan model lebih yakin
-            terhadap hasil tersebut.
-          </p>
-        </div>
-
-        <div className="about-confidence-example">
-          <small>Contoh</small>
-
-          <div>
-            <span>Matang</span>
-            <strong>94%</strong>
-          </div>
-
-          <div className="about-confidence-track">
-            <span style={{ width: "94%" }} />
-          </div>
+        </header>
+        <div className="about-technology-grid">
+          <Card as="article" className="about-technology-card">
+            <span className="about-technology-card__icon" aria-hidden="true">
+              <Icon name="scan" size={22} />
+            </span>
+            <div>
+              <p>Tahap deteksi</p>
+              <h3>YOLO11n</h3>
+              <span>Mendeteksi dan menentukan area setiap TBS yang terlihat pada gambar.</span>
+            </div>
+          </Card>
+          <Card as="article" className="about-technology-card">
+            <span className="about-technology-card__icon" aria-hidden="true">
+              <Icon name="leaf" size={22} />
+            </span>
+            <div>
+              <p>Tahap klasifikasi</p>
+              <h3>DINOv2 ViT-S/14</h3>
+              <span>Mengklasifikasikan kematangan pada setiap hasil deteksi TBS.</span>
+            </div>
+          </Card>
         </div>
       </section>
 
-      <section className="about-tech-section">
-        <div className="about-tech-copy">
-          <span className="about-eyebrow">
-            Teknologi
-          </span>
+      <Alert tone="warning" className="about-disclaimer">
+        <strong>Catatan penggunaan.</strong> Hasil SawitVision merupakan
+        informasi pendukung berdasarkan gambar. Kualitas foto dan kondisi
+        lapangan tetap perlu dipertimbangkan saat mengambil keputusan.
+      </Alert>
 
-          <h2>
-            Sistem klasifikasi berbasis deep learning
-          </h2>
+      <section className="about-creator" aria-labelledby="about-creator-title">
+        <figure className="about-creator__portrait">
+          {showCreatorImage ? (
+            <img
+              src={CREATOR_IMAGE_URL}
+              alt="Muhammad Ferdy Oktavian, pengembang SawitVision"
+              onError={() => setCreatorImageFailed(true)}
+            />
+          ) : (
+            <div className="about-creator__portrait-fallback" role="img" aria-label="Foto pengembang belum tersedia">
+              <Icon name="profile" size={30} />
+              <span>Foto pengembang</span>
+            </div>
+          )}
+        </figure>
 
-          <p>
-            SawitVision menggunakan model CNN dengan
-            arsitektur EfficientNetV2S untuk mengenali
-            pola visual pada citra buah kelapa sawit.
-          </p>
+        <div className="about-creator__content">
+          <header>
+            <p>Tentang Pengembang</p>
+            <h2 id="about-creator-title">Muhammad Ferdy Oktavian</h2>
+            <span>AI &amp; Web Developer</span>
+          </header>
 
-          <div className="about-tech-tags">
-            <span>EfficientNetV2S</span>
-            <span>3 kelas</span>
-            <span>Klasifikasi citra</span>
+          <div className="about-creator__copy">
+            <p>
+              Saya memiliki latar belakang di bidang Informatika dan antusias
+              dalam mengembangkan aplikasi berbasis teknologi, khususnya
+              Artificial Intelligence, Computer Vision, Machine Learning, Web
+              Development, dan pengembangan perangkat lunak. Saya tertarik
+              mempelajari bagaimana teknologi tidak hanya berhenti sebagai
+              eksperimen, tetapi dapat diterapkan menjadi solusi yang digunakan
+              dalam kebutuhan nyata.
+            </p>
+            <p>
+              SawitVision dikembangkan secara mandiri sebagai salah satu upaya
+              saya untuk membangun proyek teknologi yang memiliki penerapan nyata
+              dan dapat memberikan manfaat bagi orang lain. Melalui SawitVision,
+              saya mencoba menggabungkan pengembangan web dan kecerdasan buatan
+              untuk membantu proses analisis serta penilaian kematangan Tandan
+              Buah Segar (TBS) kelapa sawit.
+            </p>
+            <p>
+              Proyek ini juga menjadi bagian dari perjalanan saya dalam terus
+              belajar, bereksperimen, dan membangun portofolio di bidang
+              teknologi. Harapannya, SawitVision dapat terus berkembang menjadi
+              aplikasi yang semakin bermanfaat dan memiliki nilai guna dalam
+              dunia nyata.
+            </p>
           </div>
-        </div>
 
-        <div className="about-tech-card">
-          <span>Model AI</span>
-          <strong>EfficientNetV2S</strong>
-          <small>
-            Digunakan untuk mengklasifikasikan tingkat
-            kematangan buah dari gambar yang diberikan.
-          </small>
-        </div>
-      </section>
-
-      <section className="about-notice">
-        <div className="about-notice-icon">
-          💡
-        </div>
-
-        <div>
-          <strong>Catatan penggunaan</strong>
-          <p>
-            Hasil SawitVision merupakan bantuan
-            klasifikasi berdasarkan gambar. Kondisi
-            lapangan, kualitas foto, dan karakteristik
-            buah tetap perlu diperhatikan saat
-            melakukan penilaian.
-          </p>
+          <SocialLinks className="about-creator__social" />
         </div>
       </section>
     </main>

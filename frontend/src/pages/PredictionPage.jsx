@@ -4,6 +4,15 @@ import {
   reverseGeocodeLocation,
   updatePredictionLocationLabel,
 } from "../services/api";
+import Alert from "../components/ui/Alert";
+import Badge from "../components/ui/Badge";
+import Button from "../components/ui/Button";
+import Card from "../components/ui/Card";
+import Icon from "../components/ui/Icon";
+import IconButton from "../components/ui/IconButton";
+import LoadingState from "../components/ui/LoadingState";
+import PageHeader from "../components/ui/PageHeader";
+import SegmentedControl from "../components/ui/SegmentedControl";
 
 const MAX_ZOOM = 5;
 const MIN_ZOOM = 1;
@@ -17,7 +26,7 @@ const GEOLOCATION_OPTIONS = {
 const LOCATION_STATUS_TEXT = {
   requesting: "Meminta izin lokasi...",
   resolving: "Lokasi GPS ditemukan. Mencari nama wilayah...",
-  available: "✓ Lokasi ditemukan dan akan disimpan otomatis.",
+  available: "Lokasi ditemukan dan akan disimpan otomatis.",
   denied: "Izin lokasi ditolak. Prediksi tetap dilanjutkan tanpa lokasi.",
   timeout: "Lokasi tidak merespons. Prediksi tetap dilanjutkan.",
   unavailable: "Lokasi tidak tersedia. Prediksi tetap dilanjutkan.",
@@ -26,8 +35,7 @@ const LOCATION_STATUS_TEXT = {
 
 const CLASS_INFO = {
   belum_masak: {
-    label: "Belum Masak",
-    icon: "🟢",
+    label: "Belum Matang",
     status: "Belum siap dipanen",
     description:
       "Buah belum mencapai tingkat kematangan optimal untuk dipanen.",
@@ -36,7 +44,6 @@ const CLASS_INFO = {
   },
   masak: {
     label: "Matang",
-    icon: "🟠",
     status: "Siap dipanen",
     description:
       "Buah berada pada tingkat kematangan yang sesuai untuk dipanen.",
@@ -45,7 +52,6 @@ const CLASS_INFO = {
   },
   terlalu_masak: {
     label: "Terlalu Matang",
-    icon: "🔴",
     status: "Melewati kematangan optimal",
     description: "Buah telah melewati tingkat kematangan optimal.",
     recommendation:
@@ -197,6 +203,11 @@ function PredictionPage({ onOpenHistory }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const cameraStreamRef = useRef(null);
+  const cameraRequestIdRef = useRef(0);
+  const isMountedRef = useRef(true);
+  const cameraSectionRef = useRef(null);
+  const openCameraButtonRef = useRef(null);
+  const restoreCameraTriggerFocusRef = useRef(false);
   const resultLocationSaveRef = useRef(false);
 
   const [mode, setMode] = useState("camera");
@@ -222,6 +233,7 @@ function PredictionPage({ onOpenHistory }) {
   const [loadedResultImages, setLoadedResultImages] = useState({});
   const isBusy =
     loading || isPreparingLocation || isSavingResultLocation;
+  const isLiveCameraVisible = cameraActive && mode === "camera" && !preview;
 
   const resultPayload = useMemo(() => {
     if (result?.result && typeof result.result === "object") {
@@ -356,7 +368,6 @@ function PredictionPage({ onOpenHistory }) {
 
   const info = CLASS_INFO[resultClass] || {
     label: resultClass || "Hasil Prediksi",
-    icon: "🌴",
     status: "Hasil klasifikasi",
     description: "Hasil klasifikasi berhasil diperoleh dari sistem.",
     recommendation:
@@ -364,6 +375,8 @@ function PredictionPage({ onOpenHistory }) {
   };
 
   const stopCamera = () => {
+    cameraRequestIdRef.current += 1;
+
     if (cameraStreamRef.current) {
       cameraStreamRef.current.getTracks().forEach((track) => track.stop());
       cameraStreamRef.current = null;
@@ -384,12 +397,53 @@ function PredictionPage({ onOpenHistory }) {
   };
 
   useEffect(() => {
+    isMountedRef.current = true;
+
     return () => {
+      isMountedRef.current = false;
+      cameraRequestIdRef.current += 1;
+
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+        cameraStreamRef.current = null;
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!isLiveCameraVisible) return undefined;
+
+    const body = document.body;
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+
+    body.classList.add("camera-scroll-locked");
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      cameraSectionRef.current?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+      cameraSectionRef.current?.focus({ preventScroll: true });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      body.classList.remove("camera-scroll-locked");
+    };
+  }, [isLiveCameraVisible]);
+
+  useEffect(() => {
+    if (cameraActive || !restoreCameraTriggerFocusRef.current) return;
+
+    restoreCameraTriggerFocusRef.current = false;
+    const focusTrigger = window.requestAnimationFrame(() => {
+      openCameraButtonRef.current?.focus({ preventScroll: true });
+    });
+
+    return () => window.cancelAnimationFrame(focusTrigger);
+  }, [cameraActive]);
 
   const resetZoom = () => {
     setZoom(1);
@@ -419,6 +473,7 @@ function PredictionPage({ onOpenHistory }) {
   };
 
   const switchMode = (selectedMode) => {
+    restoreCameraTriggerFocusRef.current = false;
     stopCamera();
     clearPreviewUrl();
 
@@ -440,6 +495,10 @@ function PredictionPage({ onOpenHistory }) {
   };
 
   const openCamera = async () => {
+    restoreCameraTriggerFocusRef.current = false;
+    stopCamera();
+    const requestId = cameraRequestIdRef.current;
+
     setError("");
     setResult(null);
     setIsOpeningCamera(true);
@@ -459,8 +518,6 @@ function PredictionPage({ onOpenHistory }) {
     }
 
     try {
-      stopCamera();
-
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: {
@@ -476,6 +533,14 @@ function PredictionPage({ onOpenHistory }) {
         audio: false,
       });
 
+      if (
+        !isMountedRef.current ||
+        requestId !== cameraRequestIdRef.current
+      ) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
       cameraStreamRef.current = stream;
       setCameraActive(true);
       setIsOpeningCamera(false);
@@ -483,10 +548,24 @@ function PredictionPage({ onOpenHistory }) {
       window.requestAnimationFrame(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(() => {});
+          videoRef.current.play().catch(() => {
+            if (cameraStreamRef.current !== stream) return;
+
+            stopCamera();
+            setError(
+              "Preview kamera gagal dimulai. Tutup aplikasi kamera lain lalu coba kembali.",
+            );
+          });
         }
       });
     } catch (cameraError) {
+      if (
+        !isMountedRef.current ||
+        requestId !== cameraRequestIdRef.current
+      ) {
+        return;
+      }
+
       setCameraActive(false);
       setIsOpeningCamera(false);
 
@@ -560,6 +639,12 @@ function PredictionPage({ onOpenHistory }) {
     setError("");
     resetLocationStatus();
 
+    restoreCameraTriggerFocusRef.current = false;
+    stopCamera();
+  };
+
+  const closeCamera = () => {
+    restoreCameraTriggerFocusRef.current = true;
     stopCamera();
   };
 
@@ -781,56 +866,46 @@ function PredictionPage({ onOpenHistory }) {
   };
 
   return (
-    <main className="prediction-v2-page">
-      <section className="prediction-v2-hero">
-        <div className="prediction-v2-brand">
-          <span className="prediction-v2-brand-icon">🌴</span>
+    <main
+      className={`prediction-v2-page${isLiveCameraVisible ? " is-camera-live" : ""}`}
+    >
+      <PageHeader
+        className="prediction-v2-hero"
+        eyebrow="Pemeriksaan Lapangan"
+        title="Cek Kematangan Sawit"
+        description="Ambil foto atau pilih gambar untuk memeriksa tingkat kematangan tandan buah segar."
+      />
 
-          <div>
-            <p className="prediction-v2-eyebrow">Pemeriksa Kematangan Sawit</p>
-            <h1>Cek Kematangan Sawit</h1>
-          </div>
-        </div>
+      <SegmentedControl
+        className="prediction-v2-mode-switch"
+        label="Pilih sumber gambar"
+        value={mode}
+        onChange={switchMode}
+        disabled={isBusy}
+        options={[
+          { value: "camera", label: "Kamera", icon: <Icon name="camera" /> },
+          { value: "gallery", label: "Galeri", icon: <Icon name="gallery" /> },
+        ]}
+      />
 
-        <p className="prediction-v2-subtitle">
-          Ambil foto atau pilih gambar untuk memeriksa tingkat kematangan buah
-          kelapa sawit.
-        </p>
-      </section>
-
-      <section className="prediction-v2-mode-switch">
-        <button
-          type="button"
-          className={mode === "camera" ? "active" : ""}
-          onClick={() => switchMode("camera")}
-          disabled={isBusy}
-        >
-          Kamera
-        </button>
-
-        <button
-          type="button"
-          className={mode === "gallery" ? "active" : ""}
-          onClick={() => switchMode("gallery")}
-          disabled={isBusy}
-        >
-          Galeri
-        </button>
-      </section>
-
-      <section className="prediction-v2-tips-card">
-        <div className="prediction-v2-tips-icon">💡</div>
-
+      <Card className="prediction-v2-tips-card" variant="subtle">
+        <Icon name="info" size={20} />
         <div>
           <b>Tips foto terbaik</b>
           <p>
-            Pastikan buah terlihat jelas, cahaya cukup, dan objek berada di
-            tengah kotak panduan.
+            Pastikan TBS terlihat utuh, cahaya cukup, dan objek berada di area
+            panduan.
           </p>
         </div>
-      </section>
+      </Card>
 
-      <section className="prediction-v2-camera-card">
+      <Card
+        ref={cameraSectionRef}
+        className="prediction-v2-camera-card"
+        tabIndex={-1}
+        role="region"
+        aria-label={isLiveCameraVisible ? "Kamera aktif" : "Pengambilan gambar"}
+      >
         <div className="prediction-v2-camera-frame">
           {!preview ? (
             mode === "camera" ? (
@@ -848,7 +923,7 @@ function PredictionPage({ onOpenHistory }) {
 
                 {!cameraActive && (
                   <div className="prediction-v2-camera-placeholder">
-                    <span>📷</span>
+                    <Icon name="camera" size={36} />
                     <p>
                       {isOpeningCamera
                         ? "Membuka kamera..."
@@ -865,7 +940,7 @@ function PredictionPage({ onOpenHistory }) {
               </>
             ) : (
               <div className="prediction-v2-gallery-placeholder">
-                <span>🖼️</span>
+                <Icon name="gallery" size={36} />
                 <p>Belum ada foto dipilih</p>
               </div>
             )
@@ -880,84 +955,87 @@ function PredictionPage({ onOpenHistory }) {
 
         {mode === "camera" && !preview && (
           <div className="prediction-v2-zoom-panel">
-            <button
+            <IconButton
               type="button"
               onClick={zoomOut}
               disabled={!cameraActive || zoom <= MIN_ZOOM}
-              aria-label="Zoom out"
+              aria-label="Perkecil zoom"
             >
-              −
-            </button>
+              <Icon name="minus" />
+            </IconButton>
 
             <div className="prediction-v2-zoom-info">
               <span>Zoom</span>
               <b>{zoom.toFixed(1)}x</b>
             </div>
 
-            <button
+            <IconButton
               type="button"
               onClick={zoomIn}
               disabled={!cameraActive || zoom >= MAX_ZOOM}
-              aria-label="Zoom in"
+              aria-label="Perbesar zoom"
             >
-              +
-            </button>
+              <Icon name="plus" />
+            </IconButton>
 
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="sm"
               className="prediction-v2-reset-zoom"
               onClick={resetZoom}
               disabled={!cameraActive || zoom === 1}
             >
               Reset
-            </button>
+            </Button>
           </div>
         )}
 
         {mode === "camera" ? (
           <div className="prediction-v2-button-grid">
             {preview ? (
-              <button
+              <Button
                 type="button"
-                className="prediction-v2-secondary-btn"
+                variant="secondary"
                 onClick={retakePhoto}
                 disabled={isBusy}
               >
                 Foto Ulang
-              </button>
+              </Button>
             ) : !cameraActive ? (
-              <button
+              <Button
+                ref={openCameraButtonRef}
                 type="button"
-                className="prediction-v2-secondary-btn"
+                variant="secondary"
                 onClick={openCamera}
                 disabled={isBusy || isOpeningCamera}
               >
                 {isOpeningCamera ? "Membuka..." : "Buka Kamera"}
-              </button>
+              </Button>
             ) : (
-              <button
+              <Button
                 type="button"
-                className="prediction-v2-danger-btn"
-                onClick={stopCamera}
+                variant="danger"
+                onClick={closeCamera}
                 disabled={isBusy}
               >
                 Tutup Kamera
-              </button>
+              </Button>
             )}
 
             {!preview ? (
-              <button
+              <Button
                 type="button"
-                className="prediction-v2-primary-btn"
+                variant="primary"
                 onClick={capturePhoto}
                 disabled={!cameraActive || isBusy}
               >
                 Ambil Gambar
-              </button>
+              </Button>
             ) : (
-              <button
+              <Button
                 type="button"
-                className="prediction-v2-primary-btn"
+                variant="primary"
                 onClick={runPrediction}
                 disabled={isBusy}
               >
@@ -966,46 +1044,48 @@ function PredictionPage({ onOpenHistory }) {
                   : isPreparingLocation
                     ? "Menyiapkan lokasi..."
                     : "Mulai Prediksi"}
-              </button>
+              </Button>
             )}
           </div>
         ) : (
           <div className="prediction-v2-button-grid">
-            <button
+            <Button
               type="button"
-              className="prediction-v2-secondary-btn"
+              variant="secondary"
               onClick={resetInput}
               disabled={isBusy}
             >
               Reset
-            </button>
+            </Button>
 
-            <button
+            <Button
               type="button"
-              className="prediction-v2-primary-btn"
+              variant="secondary"
               onClick={openGallery}
               disabled={isBusy}
             >
               {preview ? "Ganti Foto" : "Pilih Foto"}
-            </button>
+            </Button>
           </div>
         )}
 
         {mode === "camera" && preview && (
-          <button
+          <Button
             type="button"
-            className="prediction-v2-secondary-btn prediction-v2-full"
+            variant="secondary"
+            block
             onClick={resetInput}
             disabled={isBusy}
           >
             Reset
-          </button>
+          </Button>
         )}
 
         {mode === "gallery" && preview && (
-          <button
+          <Button
             type="button"
-            className="prediction-v2-primary-btn prediction-v2-full"
+            variant="primary"
+            block
             onClick={runPrediction}
             disabled={isBusy}
           >
@@ -1014,7 +1094,7 @@ function PredictionPage({ onOpenHistory }) {
               : isPreparingLocation
                 ? "Menyiapkan lokasi..."
                 : "Mulai Prediksi"}
-          </button>
+          </Button>
         )}
 
         <input
@@ -1035,7 +1115,7 @@ function PredictionPage({ onOpenHistory }) {
         )}
 
         <div className="prediction-v2-location-note" role="note">
-          <span aria-hidden="true">📍</span>
+          <Icon name="location" size={21} />
           <div>
             <b className="prediction-v2-location-title">
               Lokasi Pengambilan
@@ -1045,22 +1125,26 @@ function PredictionPage({ onOpenHistory }) {
               meminta izin saat prediksi dimulai.
             </p>
             {locationStatus !== "idle" && (
-              <small className={`is-${locationStatus}`} role="status">
+              <small
+                className={`is-${locationStatus}`}
+                role="status"
+                aria-live="polite"
+              >
                 {LOCATION_STATUS_TEXT[locationStatus]}
               </small>
             )}
           </div>
         </div>
 
-        {error && <div className="prediction-v2-error">⚠️ {error}</div>}
-      </section>
+        {error && <Alert tone="error" role="alert">{error}</Alert>}
+      </Card>
 
       {loading && (
-        <section className="prediction-v2-loading-card">
-          <div className="prediction-v2-spinner" />
-          <h2>Menganalisis Citra</h2>
-          <p>Sistem sedang memeriksa tingkat kematangan buah kelapa sawit.</p>
-        </section>
+        <LoadingState
+          className="prediction-v2-loading-card"
+          title="Memproses foto..."
+          description="Mendeteksi TBS dan memeriksa tingkat kematangannya."
+        />
       )}
 
       {result && (
@@ -1164,7 +1248,9 @@ function PredictionPage({ onOpenHistory }) {
               aria-labelledby="image-summary-title"
             >
               <div className="prediction-v2-result-top">
-                <div className="prediction-v2-result-icon">{info.icon}</div>
+                <div className="prediction-v2-result-icon" aria-hidden="true">
+                  <Icon name="check" size={24} />
+                </div>
 
                 <div>
                   <p className="prediction-v2-result-label">
@@ -1174,7 +1260,9 @@ function PredictionPage({ onOpenHistory }) {
                 </div>
               </div>
 
-              <div className="prediction-v2-status-pill">{info.status}</div>
+              <Badge tone={resultClass === "terlalu_masak" ? "warning" : "success"}>
+                {info.status}
+              </Badge>
 
               <div className="prediction-v2-confidence-box">
                 <span>Keyakinan ringkasan kematangan</span>
@@ -1203,7 +1291,7 @@ function PredictionPage({ onOpenHistory }) {
                     <div className="prediction-v2-prob-bar-item" key={key}>
                       <div className="prediction-v2-prob-bar-top">
                         <span>
-                          {classInfo.icon} {classInfo.label}
+                          {classInfo.label}
                         </span>
                         <b>{percent.toFixed(2)}%</b>
                       </div>
@@ -1291,7 +1379,7 @@ function PredictionPage({ onOpenHistory }) {
             ) : (
               <div className="prediction-v2-result-location-name-row">
                 <div className="prediction-v2-result-location-name">
-                  <span aria-hidden="true">📍</span>
+                  <Icon name="location" size={22} />
                   <div>
                     <small>Lokasi</small>
                     <strong>{resultLocationName}</strong>
@@ -1304,6 +1392,7 @@ function PredictionPage({ onOpenHistory }) {
                     className="prediction-v2-result-location-edit-button"
                     onClick={startEditingResultLocation}
                   >
+                    <Icon name="edit" size={17} />
                     {resultLocationLabel || resultLocationAutoName
                       ? "Edit Nama Lokasi"
                       : "Tambah Nama Lokasi"}
@@ -1356,8 +1445,9 @@ function PredictionPage({ onOpenHistory }) {
                   target="_blank"
                   rel="noopener noreferrer"
                 >
+                  <Icon name="map" size={18} />
                   Lihat di Peta
-                  <span aria-hidden="true">↗</span>
+                  <Icon name="external" size={16} />
                 </a>
               </>
             ) : (
@@ -1368,8 +1458,8 @@ function PredictionPage({ onOpenHistory }) {
           </section>
 
           <div className="prediction-v2-scan-meta">
-            <span>📅 {new Date().toLocaleDateString("id-ID")}</span>
-            <span>📷 {source === "camera" ? "Kamera" : "Galeri"}</span>
+            <span><Icon name="calendar" size={16} /> {new Date().toLocaleDateString("id-ID")}</span>
+            <span><Icon name={source === "camera" ? "camera" : "gallery"} size={16} /> {source === "camera" ? "Kamera" : "Galeri"}</span>
           </div>
 
           {detections.length > 0 && (
@@ -1419,29 +1509,33 @@ function PredictionPage({ onOpenHistory }) {
                         </div>
                       </dl>
 
-                      {detectionProbabilities &&
-                        typeof detectionProbabilities === "object" && (
-                          <div className="prediction-v2-detection-probs">
-                            {Object.entries(CLASS_INFO).map(
-                              ([key, classInfo]) => (
-                                <div key={key}>
-                                  <span>{classInfo.label}</span>
-                                  <b>
-                                    {toPercent(
-                                      detectionProbabilities[key],
-                                    ).toFixed(2)}
-                                    %
-                                  </b>
-                                </div>
-                              ),
+                      {(detectionProbabilities || bbox) && (
+                        <details className="prediction-v2-detection-disclosure">
+                          <summary>Lihat rincian TBS</summary>
+                          {detectionProbabilities &&
+                            typeof detectionProbabilities === "object" && (
+                              <div className="prediction-v2-detection-probs">
+                                {Object.entries(CLASS_INFO).map(
+                                  ([key, classInfo]) => (
+                                    <div key={key}>
+                                      <span>{classInfo.label}</span>
+                                      <b>
+                                        {toPercent(
+                                          detectionProbabilities[key],
+                                        ).toFixed(2)}
+                                        %
+                                      </b>
+                                    </div>
+                                  ),
+                                )}
+                              </div>
                             )}
-                          </div>
-                        )}
-
-                      {bbox && (
-                        <details className="prediction-v2-bbox-details">
-                          <summary>Koordinat bounding box</summary>
-                          <code>[{bbox.join(", ")}]</code>
+                          {bbox && (
+                            <div className="prediction-v2-bbox-details">
+                              <span>Koordinat bounding box</span>
+                              <code>[{bbox.join(", ")}]</code>
+                            </div>
+                          )}
                         </details>
                       )}
                     </article>
@@ -1469,21 +1563,23 @@ function PredictionPage({ onOpenHistory }) {
           )}
 
           <div className="prediction-v2-result-actions">
-            <button
+            <Button
               type="button"
+              variant="secondary"
               onClick={resetInput}
               disabled={isSavingResultLocation}
             >
               Periksa gambar lain
-            </button>
+            </Button>
 
-            <button
+            <Button
               type="button"
+              variant="primary"
               onClick={onOpenHistory}
               disabled={isSavingResultLocation}
             >
               Lihat riwayat
-            </button>
+            </Button>
           </div>
         </section>
       )}

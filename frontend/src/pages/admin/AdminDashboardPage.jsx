@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cleanupActivityLogs,
   cleanupStorage,
@@ -9,578 +9,402 @@ import {
   getAdminUsers,
   updateAdminUserStatus,
 } from "../../services/api";
+import AdminActivity from "../../components/admin/AdminActivity";
+import AdminOverview from "../../components/admin/AdminOverview";
+import AdminPredictions from "../../components/admin/AdminPredictions";
+import AdminReports from "../../components/admin/AdminReports";
+import AdminSectionNav from "../../components/admin/AdminSectionNav";
+import AdminStorage from "../../components/admin/AdminStorage";
+import AdminUsers from "../../components/admin/AdminUsers";
+import Alert from "../../components/ui/Alert";
+import Button from "../../components/ui/Button";
+import EmptyState from "../../components/ui/EmptyState";
+import Icon from "../../components/ui/Icon";
+import Modal from "../../components/ui/Modal";
+import PageHeader from "../../components/ui/PageHeader";
 
-const CLASS_META = {
-  belum_masak: {
-    label: "Belum Matang",
-    icon: "🟢",
-  },
-  masak: {
-    label: "Matang",
-    icon: "🟠",
-  },
-  terlalu_masak: {
-    label: "Terlalu Matang",
-    icon: "🔴",
-  },
-};
-
-const MENU = [
-  {
-    id: "overview",
-    icon: "🧭",
-    label: "Ringkasan",
-  },
-  {
-    id: "users",
-    icon: "👥",
-    label: "Pengguna",
-  },
-  {
-    id: "predictions",
-    icon: "📊",
-    label: "Prediksi",
-  },
-  {
-    id: "activity",
-    icon: "🧾",
-    label: "Aktivitas",
-  },
-  {
-    id: "storage",
-    icon: "🗂️",
-    label: "Storage",
-  },
-  {
-    id: "reports",
-    icon: "📄",
-    label: "Laporan",
-  },
-];
-
-function formatDate(value) {
-  if (!value) return "-";
-
-  try {
-    return new Intl.DateTimeFormat("id-ID", {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }).format(new Date(value));
-  } catch {
-    return value;
-  }
-}
-
-function formatConfidence(value) {
-  const number = Number(value || 0);
-  const percentage = number <= 1 ? number * 100 : number;
-  return `${percentage.toFixed(2)}%`;
-}
+const USERS_PAGE_SIZE = 20;
+const ACTIVITY_PAGE_SIZE = 50;
 
 function toSafeCount(value, fallback = 0) {
   const number = Number(value);
-  return Number.isFinite(number) && number >= 0
-    ? Math.trunc(number)
-    : fallback;
-}
-
-function hasNumericValue(value) {
-  return value !== null && value !== undefined && Number.isFinite(Number(value));
-}
-
-function getImageClassCount(distribution, className) {
-  const value = distribution?.[className];
-
-  if (value && typeof value === "object") {
-    return toSafeCount(value.total);
-  }
-
-  return toSafeCount(value);
-}
-
-function ImageDistributionPanel({ imageByClass, predictionByClass }) {
-  return (
-    <article className="admin-panel">
-      <div className="admin-panel-title">
-        <div>
-          <span>Distribusi ringkasan foto</span>
-          <h3>Jumlah foto berdasarkan kelas</h3>
-        </div>
-      </div>
-
-      <div className="admin-class-list">
-        {Object.entries(CLASS_META).map(([key, meta]) => {
-          const total = getImageClassCount(imageByClass, key);
-          const average = predictionByClass?.[key]?.avg_confidence;
-
-          return (
-            <div key={key}>
-              <div>
-                <span aria-hidden="true">{meta.icon}</span>
-                <strong>{meta.label}</strong>
-              </div>
-
-              <div className="admin-class-value">
-                <strong>{total} foto</strong>
-                {hasNumericValue(average) && (
-                  <small>
-                    Rata-rata ringkasan {formatConfidence(average)}
-                  </small>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </article>
-  );
-}
-
-function TbsDistributionPanel({
-  tbsByClass,
-  avgDetectorConfidence,
-  detailsUnavailable,
-  coverageMessage,
-  coverageCaption,
-  coverageStatus,
-}) {
-  return (
-    <article className="admin-panel admin-tbs-panel">
-      <div className="admin-panel-title">
-        <div>
-          <span>Distribusi TBS</span>
-          <h3>Jumlah TBS berdasarkan kelas</h3>
-        </div>
-
-        {!detailsUnavailable && hasNumericValue(avgDetectorConfidence) && (
-          <div className="admin-detector-metric">
-            <small>Rata-rata deteksi YOLO</small>
-            <strong>{formatConfidence(avgDetectorConfidence)}</strong>
-          </div>
-        )}
-      </div>
-
-      <div className="admin-class-list">
-        {Object.entries(CLASS_META).map(([key, meta]) => {
-          const classStats = tbsByClass?.[key];
-          const total = toSafeCount(classStats?.total);
-          const average = classStats?.avg_maturity_confidence;
-
-          return (
-            <div key={key}>
-              <div>
-                <span aria-hidden="true">{meta.icon}</span>
-                <strong>{meta.label}</strong>
-              </div>
-
-              <div className="admin-class-value">
-                <strong>{detailsUnavailable ? "—" : `${total} TBS`}</strong>
-                {!detailsUnavailable && total > 0 && hasNumericValue(average) && (
-                  <small>
-                    Rata-rata kematangan {formatConfidence(average)}
-                  </small>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className={`admin-coverage-note ${coverageStatus}`} role="note">
-        <span aria-hidden="true">ⓘ</span>
-        <div>
-          <strong>{coverageMessage}</strong>
-          {coverageCaption && <small>{coverageCaption}</small>}
-        </div>
-      </div>
-    </article>
-  );
+  return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : fallback;
 }
 
 function AdminDashboardPage({ currentUser }) {
   const [activeTab, setActiveTab] = useState("overview");
-
   const [stats, setStats] = useState(null);
   const [storageStats, setStorageStats] = useState(null);
   const [users, setUsers] = useState([]);
   const [activityLogs, setActivityLogs] = useState([]);
-
   const [usersSearch, setUsersSearch] = useState("");
   const [activitySearch, setActivitySearch] = useState("");
-
+  const usersSearchRef = useRef("");
+  const activitySearchRef = useRef("");
+  const usersPageRef = useRef(1);
+  const usersLoadingRef = useRef(false);
+  const activityPageRef = useRef(1);
+  const activityLoadingRef = useRef(false);
   const [isLoadingStats, setIsLoadingStats] = useState(true);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [usersPagination, setUsersPagination] = useState({
+    page: 1,
+    total: 0,
+    totalPages: 0,
+    hasMore: false,
+  });
   const [isLoadingActivity, setIsLoadingActivity] = useState(false);
+  const [activityPagination, setActivityPagination] = useState({
+    page: 1,
+    total: 0,
+    totalPages: 0,
+    hasMore: false,
+  });
   const [isLoadingStorage, setIsLoadingStorage] = useState(false);
-
   const [actionUserId, setActionUserId] = useState("");
   const [isCleaningStorage, setIsCleaningStorage] = useState(false);
   const [isCleaningLogs, setIsCleaningLogs] = useState(false);
   const [isDownloadingReport, setIsDownloadingReport] = useState(false);
-
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
-
+  const [confirmation, setConfirmation] = useState(null);
   const [reportFilter, setReportFilter] = useState({
     start_date: "",
     end_date: "",
     predicted_class: "",
   });
 
-  const isAdmin =
-    currentUser?.role === "admin";
+  const isAdmin = currentUser?.role === "admin";
 
-  const loadStats = async () => {
+  const loadStats = useCallback(async () => {
     setIsLoadingStats(true);
     setErrorMessage("");
-
     try {
-      const response = await getAdminStats();
-      setStats(response);
+      setStats(await getAdminStats());
     } catch (error) {
-      setErrorMessage(
-        error.message ||
-          "Statistik admin gagal dimuat."
-      );
+      setErrorMessage(error.message || "Statistik admin gagal dimuat.");
     } finally {
       setIsLoadingStats(false);
     }
-  };
+  }, []);
 
-  const loadUsers = async () => {
+  const loadUsers = useCallback(async (requestedPage = usersPageRef.current) => {
+    if (usersLoadingRef.current) return;
+
+    usersLoadingRef.current = true;
     setIsLoadingUsers(true);
     setErrorMessage("");
-
     try {
-      const response = await getAdminUsers({
-        limit: 100,
-        offset: 0,
-        search: usersSearch.trim(),
+      const page = Math.max(1, Number(requestedPage) || 1);
+      let response = await getAdminUsers({
+        limit: USERS_PAGE_SIZE,
+        offset: (page - 1) * USERS_PAGE_SIZE,
+        search: usersSearchRef.current.trim(),
       });
+
+      let total = toSafeCount(response?.total);
+      let totalPages = total > 0
+        ? Math.ceil(total / USERS_PAGE_SIZE)
+        : 0;
+      let effectivePage = page;
+
+      if (
+        page > 1 &&
+        (response?.data || []).length === 0 &&
+        total > 0 &&
+        totalPages > 0 &&
+        page > totalPages
+      ) {
+        effectivePage = totalPages;
+        response = await getAdminUsers({
+          limit: USERS_PAGE_SIZE,
+          offset: (effectivePage - 1) * USERS_PAGE_SIZE,
+          search: usersSearchRef.current.trim(),
+        });
+        total = toSafeCount(response?.total);
+        totalPages = total > 0
+          ? Math.ceil(total / USERS_PAGE_SIZE)
+          : 0;
+      }
 
       setUsers(response?.data || []);
+      usersPageRef.current = effectivePage;
+      setUsersPagination({
+        page: effectivePage,
+        total,
+        totalPages,
+        hasMore: Boolean(response?.has_more),
+      });
     } catch (error) {
-      setErrorMessage(
-        error.message ||
-          "Daftar pengguna gagal dimuat."
-      );
+      setErrorMessage(error.message || "Daftar pengguna gagal dimuat.");
     } finally {
+      usersLoadingRef.current = false;
       setIsLoadingUsers(false);
     }
-  };
+  }, []);
 
-  const loadActivity = async () => {
+  const loadActivity = useCallback(async (requestedPage = activityPageRef.current) => {
+    if (activityLoadingRef.current) return;
+
+    activityLoadingRef.current = true;
     setIsLoadingActivity(true);
     setErrorMessage("");
-
     try {
-      const response = await getAdminActivityLogs({
-        page: 1,
-        pageSize: 100,
-        search: activitySearch.trim(),
+      const page = Math.max(1, Number(requestedPage) || 1);
+      let response = await getAdminActivityLogs({
+        page,
+        pageSize: ACTIVITY_PAGE_SIZE,
+        search: activitySearchRef.current.trim(),
       });
 
+      const responseTotal = toSafeCount(response?.total);
+      const responseTotalPages = toSafeCount(response?.total_pages);
+      let effectivePage = toSafeCount(response?.page, page) || page;
+
+      if (
+        page > 1 &&
+        (response?.data || []).length === 0 &&
+        responseTotal > 0 &&
+        responseTotalPages > 0 &&
+        page > responseTotalPages
+      ) {
+        effectivePage = responseTotalPages;
+        response = await getAdminActivityLogs({
+          page: effectivePage,
+          pageSize: ACTIVITY_PAGE_SIZE,
+          search: activitySearchRef.current.trim(),
+        });
+      }
+
       setActivityLogs(response?.data || []);
+      activityPageRef.current = effectivePage;
+      setActivityPagination({
+        page: effectivePage,
+        total: toSafeCount(response?.total),
+        totalPages: toSafeCount(response?.total_pages),
+        hasMore: Boolean(response?.has_more),
+      });
     } catch (error) {
-      setErrorMessage(
-        error.message ||
-          "Aktivitas sistem gagal dimuat."
-      );
+      setErrorMessage(error.message || "Aktivitas sistem gagal dimuat.");
     } finally {
+      activityLoadingRef.current = false;
       setIsLoadingActivity(false);
     }
-  };
+  }, []);
 
-  const loadStorage = async () => {
+  const loadStorage = useCallback(async () => {
     setIsLoadingStorage(true);
     setErrorMessage("");
-
     try {
-      const response = await getAdminStorageStats();
-      setStorageStats(response);
+      setStorageStats(await getAdminStorageStats());
     } catch (error) {
-      setErrorMessage(
-        error.message ||
-          "Informasi storage gagal dimuat."
-      );
+      setErrorMessage(error.message || "Informasi storage gagal dimuat.");
     } finally {
       setIsLoadingStorage(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (!isAdmin) return;
 
-    loadStats();
-    loadStorage();
-  }, [isAdmin]);
+    async function loadInitialData() {
+      await Promise.all([loadStats(), loadStorage()]);
+    }
+
+    loadInitialData();
+  }, [isAdmin, loadStats, loadStorage]);
 
   useEffect(() => {
     if (!isAdmin) return;
 
-    if (activeTab === "users") {
-      loadUsers();
+    async function loadActiveSection() {
+      if (activeTab === "users") await loadUsers();
+      if (activeTab === "activity") await loadActivity();
+      if (activeTab === "storage") await loadStorage();
     }
 
-    if (activeTab === "activity") {
-      loadActivity();
-    }
+    loadActiveSection();
+  }, [activeTab, isAdmin, loadActivity, loadStorage, loadUsers]);
 
-    if (activeTab === "storage") {
-      loadStorage();
-    }
-  }, [activeTab]);
-
-  const predictionByClass =
-    stats?.predictions?.by_class || {};
-
-  const imageStats =
-    stats?.predictions?.image_stats;
-
-  const imageByClass =
-    imageStats?.by_summary_class ||
-    predictionByClass;
-
-  const tbsStats =
-    stats?.predictions?.tbs_stats;
-
-  const tbsByClass =
-    tbsStats?.by_class || {};
-
-  const recentPredictions =
-    stats?.predictions?.recent || [];
-
-  const totalUsers =
-    stats?.users?.total || 0;
-
-  const activeUsers =
-    stats?.users?.active || 0;
-
-  const totalImages = toSafeCount(
-    imageStats?.total_images,
-    toSafeCount(stats?.predictions?.total),
-  );
-
-  const totalTbs = toSafeCount(
-    tbsStats?.total_tbs,
-  );
-
-  const coverage = tbsStats?.coverage;
-
-  const imagesWithDetectionDetails = toSafeCount(
-    coverage?.images_with_detection_details,
-  );
-
-  const imagesWithoutDetectionDetails = toSafeCount(
-    coverage?.images_without_detection_details,
-    Math.max(totalImages - imagesWithDetectionDetails, 0),
-  );
-
-  const rawCoveragePercentage = Number(
-    coverage?.coverage_percentage,
-  );
-
-  const coveragePercentage = Number.isFinite(
-    rawCoveragePercentage,
-  )
-    ? Math.min(Math.max(rawCoveragePercentage, 0), 100)
-    : totalImages > 0
-      ? (imagesWithDetectionDetails / totalImages) * 100
-      : 0;
-
-  const formattedCoveragePercentage =
-    new Intl.NumberFormat("id-ID", {
+  const dashboardData = useMemo(() => {
+    const predictionByClass = stats?.predictions?.by_class || {};
+    const imageStats = stats?.predictions?.image_stats;
+    const imageByClass = imageStats?.by_summary_class || predictionByClass;
+    const tbsStats = stats?.predictions?.tbs_stats;
+    const totalImages = toSafeCount(
+      imageStats?.total_images,
+      toSafeCount(stats?.predictions?.total),
+    );
+    const totalTbs = toSafeCount(tbsStats?.total_tbs);
+    const coverage = tbsStats?.coverage;
+    const imagesWithDetectionDetails = toSafeCount(coverage?.images_with_detection_details);
+    const imagesWithoutDetectionDetails = toSafeCount(
+      coverage?.images_without_detection_details,
+      Math.max(totalImages - imagesWithDetectionDetails, 0),
+    );
+    const rawCoverage = Number(coverage?.coverage_percentage);
+    const coveragePercentage = Number.isFinite(rawCoverage)
+      ? Math.min(Math.max(rawCoverage, 0), 100)
+      : totalImages > 0
+        ? (imagesWithDetectionDetails / totalImages) * 100
+        : 0;
+    const formattedCoverage = new Intl.NumberFormat("id-ID", {
       maximumFractionDigits: 2,
     }).format(coveragePercentage);
+    const tbsDetailsUnavailable = totalImages > 0 && (!tbsStats || imagesWithDetectionDetails === 0);
+    let coverageStatus = "complete";
+    let coverageMessage = "Belum ada foto tersimpan.";
+    let coverageCaption = "Statistik TBS akan tersedia setelah ada hasil baru.";
 
-  const tbsDetailsUnavailable =
-    totalImages > 0 &&
-    (!tbsStats || imagesWithDetectionDetails === 0);
+    if (tbsDetailsUnavailable) {
+      coverageStatus = "unavailable";
+      coverageMessage = "Detail TBS belum tersedia untuk data ini.";
+      coverageCaption = "Record tanpa detail multi-deteksi tidak dianggap sebagai nol TBS.";
+    } else if (totalImages > 0 && (imagesWithoutDetectionDetails > 0 || coveragePercentage < 100)) {
+      coverageStatus = "partial";
+      coverageMessage = `Detail TBS tersedia untuk ${imagesWithDetectionDetails} dari ${totalImages} foto (${formattedCoverage}%).`;
+      coverageCaption = "Statistik TBS dihitung dari hasil yang memiliki detail multi-deteksi tersimpan.";
+    } else if (totalImages > 0) {
+      coverageMessage = `Detail TBS tersedia untuk seluruh ${totalImages} foto (${formattedCoverage}%).`;
+      coverageCaption = "Seluruh foto memiliki detail multi-deteksi tersimpan.";
+    }
 
-  let coverageStatus = "complete";
-  let coverageMessage = "Belum ada foto tersimpan.";
-  let coverageCaption = "Statistik TBS akan tersedia setelah ada hasil baru.";
+    const rawStoragePercentage = Number(storageStats?.usage?.percentage || 0);
+    const storagePercentage = Number.isFinite(rawStoragePercentage) ? rawStoragePercentage : 0;
 
-  if (tbsDetailsUnavailable) {
-    coverageStatus = "unavailable";
-    coverageMessage = "Detail TBS belum tersedia untuk data ini.";
-    coverageCaption =
-      "Record tanpa detail multi-deteksi tidak dianggap sebagai nol TBS.";
-  } else if (
-    totalImages > 0 &&
-    (imagesWithoutDetectionDetails > 0 || coveragePercentage < 100)
-  ) {
-    coverageStatus = "partial";
-    coverageMessage =
-      `Detail TBS tersedia untuk ${imagesWithDetectionDetails} dari ` +
-      `${totalImages} foto (${formattedCoveragePercentage}%).`;
-    coverageCaption =
-      "Statistik TBS dihitung dari hasil yang memiliki detail multi-deteksi tersimpan.";
-  } else if (totalImages > 0) {
-    coverageMessage =
-      `Detail TBS tersedia untuk seluruh ${totalImages} foto ` +
-      `(${formattedCoveragePercentage}%).`;
-    coverageCaption = "Seluruh foto memiliki detail multi-deteksi tersimpan.";
-  }
-
-  const totalLogs =
-    stats?.activity_logs?.total || 0;
-
-  const storagePercentage =
-    Number(
-      storageStats?.usage?.percentage || 0
-    );
+    return {
+      hasStats: Boolean(stats),
+      totalUsers: toSafeCount(stats?.users?.total),
+      activeUsers: toSafeCount(stats?.users?.active),
+      regularUsers: toSafeCount(stats?.users?.regular),
+      adminUsers: toSafeCount(stats?.users?.admin),
+      totalLogs: toSafeCount(stats?.activity_logs?.total),
+      totalImages,
+      totalTbs,
+      tbsDetailsUnavailable,
+      imageByClass,
+      predictionByClass,
+      tbsByClass: tbsStats?.by_class || {},
+      avgDetectorConfidence: tbsStats?.avg_detector_confidence,
+      recentPredictions: stats?.predictions?.recent || [],
+      storagePercentage,
+      coverageStatus,
+      coverageMessage,
+      coverageCaption,
+    };
+  }, [stats, storageStats]);
 
   const storageStatusLabel = useMemo(() => {
-    if (storageStats?.status === "critical") {
-      return "Kritis";
-    }
-
-    if (storageStats?.status === "warning") {
-      return "Perlu perhatian";
-    }
-
+    if (storageStats?.status === "critical") return "Kritis";
+    if (storageStats?.status === "warning") return "Perlu perhatian";
     return "Aman";
   }, [storageStats]);
 
-  const handleUserStatus = async (user) => {
+  const updateUserStatus = async (user) => {
     const nextStatus = !user.is_active;
-
-    const confirmation = window.confirm(
-      nextStatus
-        ? `Aktifkan akun ${user.name}?`
-        : `Nonaktifkan akun ${user.name}?`
-    );
-
-    if (!confirmation) return;
-
     setActionUserId(user.id);
     setErrorMessage("");
     setSuccessMessage("");
-
     try {
-      await updateAdminUserStatus(
-        user.id,
-        nextStatus
-      );
-
-      setUsers((current) =>
-        current.map((item) =>
-          item.id === user.id
-            ? {
-                ...item,
-                is_active: nextStatus,
-              }
-            : item
-        )
-      );
-
-      setSuccessMessage(
-        `Status akun ${user.name} berhasil diperbarui.`
-      );
-
+      await updateAdminUserStatus(user.id, nextStatus);
+      setUsers((current) => current.map((item) => (
+        item.id === user.id ? { ...item, is_active: nextStatus } : item
+      )));
+      setSuccessMessage(`Status akun ${user.name} berhasil diperbarui.`);
       loadStats();
     } catch (error) {
-      setErrorMessage(
-        error.message ||
-          "Status pengguna gagal diperbarui."
-      );
+      setErrorMessage(error.message || "Status pengguna gagal diperbarui.");
     } finally {
       setActionUserId("");
+      setConfirmation(null);
     }
   };
 
-  const handleStorageCleanup = async () => {
-    const confirmation = window.confirm(
-      "Bersihkan gambar prediksi lama dari storage? Record prediksi tetap disimpan."
-    );
-
-    if (!confirmation) return;
-
+  const cleanStorage = async () => {
     setIsCleaningStorage(true);
     setErrorMessage("");
     setSuccessMessage("");
-
     try {
       const response = await cleanupStorage(10);
-
-      setSuccessMessage(
-        response?.message ||
-          "Storage berhasil dibersihkan."
-      );
-
-      await Promise.all([
-        loadStorage(),
-        loadStats(),
-      ]);
+      setSuccessMessage(response?.message || "Storage berhasil dibersihkan.");
+      await Promise.all([loadStorage(), loadStats()]);
     } catch (error) {
-      setErrorMessage(
-        error.message ||
-          "Cleanup storage gagal."
-      );
+      setErrorMessage(error.message || "Cleanup storage gagal.");
     } finally {
       setIsCleaningStorage(false);
+      setConfirmation(null);
     }
   };
 
-  const handleActivityCleanup = async () => {
-    const confirmation = window.confirm(
-      "Hapus activity log yang lebih lama dari 90 hari?"
-    );
-
-    if (!confirmation) return;
-
+  const cleanActivity = async () => {
     setIsCleaningLogs(true);
     setErrorMessage("");
     setSuccessMessage("");
-
     try {
-      const response =
-        await cleanupActivityLogs(90);
-
-      setSuccessMessage(
-        response?.message ||
-          "Activity log lama berhasil dibersihkan."
-      );
-
-      await Promise.all([
-        loadActivity(),
-        loadStats(),
-      ]);
+      const response = await cleanupActivityLogs(90);
+      setSuccessMessage(response?.message || "Activity log lama berhasil dibersihkan.");
+      await Promise.all([loadActivity(), loadStats()]);
     } catch (error) {
-      setErrorMessage(
-        error.message ||
-          "Activity log gagal dibersihkan."
-      );
+      setErrorMessage(error.message || "Activity log gagal dibersihkan.");
     } finally {
       setIsCleaningLogs(false);
+      setConfirmation(null);
     }
   };
+
+  const handleConfirmation = () => {
+    if (confirmation?.type === "user-status") updateUserStatus(confirmation.user);
+    if (confirmation?.type === "storage") cleanStorage();
+    if (confirmation?.type === "activity") cleanActivity();
+  };
+
+  const confirmationBusy = Boolean(
+    (confirmation?.type === "user-status" && actionUserId) ||
+    (confirmation?.type === "storage" && isCleaningStorage) ||
+    (confirmation?.type === "activity" && isCleaningLogs),
+  );
+
+  const confirmationCopy = useMemo(() => {
+    if (confirmation?.type === "user-status") {
+      const willActivate = !confirmation.user.is_active;
+      return {
+        title: willActivate ? "Aktifkan akun pengguna?" : "Nonaktifkan akun pengguna?",
+        description: willActivate
+          ? `Akun ${confirmation.user.name} akan dapat digunakan kembali.`
+          : `Akun ${confirmation.user.name} tidak dapat digunakan sampai diaktifkan kembali.`,
+        confirmLabel: willActivate ? "Aktifkan akun" : "Nonaktifkan akun",
+        danger: !willActivate,
+      };
+    }
+    if (confirmation?.type === "storage") {
+      return {
+        title: "Bersihkan gambar lama?",
+        description: "File gambar prediksi lama akan dihapus sesuai proses backend. Record prediksi tetap disimpan.",
+        confirmLabel: "Bersihkan storage",
+        danger: true,
+      };
+    }
+    return {
+      title: "Hapus activity log lama?",
+      description: "Activity log yang berusia lebih dari 90 hari akan dihapus dan tidak dapat dipulihkan.",
+      confirmLabel: "Hapus log lama",
+      danger: true,
+    };
+  }, [confirmation]);
 
   const handleDownloadReport = async () => {
     setIsDownloadingReport(true);
     setErrorMessage("");
     setSuccessMessage("");
-
     try {
       await downloadAdminPredictionReport({
-        startDate:
-          reportFilter.start_date || undefined,
-        endDate:
-          reportFilter.end_date || undefined,
-        predictedClass:
-          reportFilter.predicted_class ||
-          undefined,
+        startDate: reportFilter.start_date || undefined,
+        endDate: reportFilter.end_date || undefined,
+        predictedClass: reportFilter.predicted_class || undefined,
       });
-
-      setSuccessMessage(
-        "Laporan Excel berhasil diunduh."
-      );
+      setSuccessMessage("Laporan Excel berhasil diunduh.");
     } catch (error) {
-      setErrorMessage(
-        error.message ||
-          "Laporan gagal diunduh."
-      );
+      setErrorMessage(error.message || "Laporan gagal diunduh.");
     } finally {
       setIsDownloadingReport(false);
     }
@@ -588,852 +412,153 @@ function AdminDashboardPage({ currentUser }) {
 
   if (!isAdmin) {
     return (
-      <main className="admin-page">
-        <section className="admin-access-denied">
-          <div>🔒</div>
-          <h1>Akses admin diperlukan</h1>
-          <p>
-            Halaman ini hanya dapat dibuka oleh
-            akun dengan peran administrator.
-          </p>
-        </section>
+      <main className="admin-page admin-page--denied">
+        <EmptyState
+          icon="admin"
+          title="Akses admin diperlukan"
+          description="Halaman ini hanya dapat dibuka oleh akun dengan peran administrator."
+        />
       </main>
     );
   }
 
+  const renderSection = () => {
+    if (activeTab === "users") {
+      return (
+        <AdminUsers
+          users={users}
+          search={usersSearch}
+          onSearchChange={(value) => {
+            usersSearchRef.current = value;
+            setUsersSearch(value);
+          }}
+          onSearch={() => loadUsers(1)}
+          pagination={usersPagination}
+          pageSize={USERS_PAGE_SIZE}
+          onPageChange={loadUsers}
+          isLoading={isLoadingUsers}
+          actionUserId={actionUserId}
+          onStatusChange={(user) => setConfirmation({ type: "user-status", user })}
+        />
+      );
+    }
+    if (activeTab === "predictions") {
+      return <AdminPredictions data={dashboardData} isLoading={isLoadingStats} />;
+    }
+    if (activeTab === "activity") {
+      return (
+        <AdminActivity
+          logs={activityLogs}
+          search={activitySearch}
+          onSearchChange={(value) => {
+            activitySearchRef.current = value;
+            setActivitySearch(value);
+          }}
+          onSearch={() => loadActivity(1)}
+          pagination={activityPagination}
+          pageSize={ACTIVITY_PAGE_SIZE}
+          onPageChange={loadActivity}
+          isLoading={isLoadingActivity}
+          isCleaning={isCleaningLogs}
+          onCleanup={() => setConfirmation({ type: "activity" })}
+        />
+      );
+    }
+    if (activeTab === "storage") {
+      return (
+        <AdminStorage
+          storageStats={storageStats}
+          percentage={dashboardData.storagePercentage}
+          statusLabel={storageStatusLabel}
+          isLoading={isLoadingStorage}
+          isCleaning={isCleaningStorage}
+          onCleanup={() => setConfirmation({ type: "storage" })}
+        />
+      );
+    }
+    if (activeTab === "reports") {
+      return (
+        <AdminReports
+          filter={reportFilter}
+          onFilterChange={(field, value) => setReportFilter((current) => ({ ...current, [field]: value }))}
+          onDownload={handleDownloadReport}
+          isDownloading={isDownloadingReport}
+        />
+      );
+    }
+    return (
+      <AdminOverview
+        data={dashboardData}
+        isLoading={isLoadingStats || isLoadingStorage}
+        onRefresh={() => Promise.all([loadStats(), loadStorage()])}
+      />
+    );
+  };
+
   return (
     <main className="admin-page">
-      <section className="admin-hero">
-        <div>
-          <span>Panel administrator</span>
-          <h1>Dashboard SawitVision</h1>
-          <p>
-            Pantau pengguna, prediksi, aktivitas,
-            storage, dan laporan dari satu tempat.
-          </p>
-        </div>
+      <PageHeader
+        eyebrow="Administrasi"
+        title="Dashboard admin"
+        description="Pantau pengguna, prediksi, aktivitas, storage, dan laporan SawitVision."
+        actions={(
+          <div className="admin-identity">
+            <span>Administrator</span>
+            <strong>{currentUser?.full_name || currentUser?.name || "Admin"}</strong>
+          </div>
+        )}
+      />
 
-        <div className="admin-hero-user">
-          <small>Administrator</small>
-          <strong>
-            {currentUser?.full_name ||
-              currentUser?.name ||
-              "Admin"}
-          </strong>
-          <span>● Aktif</span>
+      <div className="admin-workspace">
+        <AdminSectionNav
+          activeSection={activeTab}
+          onChange={(section) => {
+            setActiveTab(section);
+            setErrorMessage("");
+            setSuccessMessage("");
+          }}
+        />
+        <div className="admin-content">
+          {errorMessage && <Alert tone="error" role="alert">{errorMessage}</Alert>}
+          {successMessage && <Alert tone="success" role="status">{successMessage}</Alert>}
+          {renderSection()}
         </div>
-      </section>
+      </div>
 
-      <nav className="admin-menu">
-        {MENU.map((item) => (
-          <button
-            key={item.id}
+      <Modal
+        open={Boolean(confirmation)}
+        onClose={() => {
+          if (!confirmationBusy) setConfirmation(null);
+        }}
+        title={confirmationCopy.title}
+        eyebrow="Konfirmasi tindakan"
+        role={confirmationCopy.danger ? "alertdialog" : "dialog"}
+        closeOnBackdrop={!confirmationBusy}
+        className="admin-confirmation-modal"
+      >
+        <p className="admin-confirmation-copy">{confirmationCopy.description}</p>
+        <div className="admin-confirmation-actions">
+          <Button
             type="button"
-            className={
-              activeTab === item.id
-                ? "active"
-                : ""
-            }
-            onClick={() => {
-              setActiveTab(item.id);
-              setErrorMessage("");
-              setSuccessMessage("");
-            }}
+            variant="secondary"
+            data-autofocus
+            disabled={confirmationBusy}
+            onClick={() => setConfirmation(null)}
           >
-            <span>{item.icon}</span>
-            <strong>{item.label}</strong>
-          </button>
-        ))}
-      </nav>
-
-      {errorMessage && (
-        <div className="admin-message error">
-          ⚠️ {errorMessage}
+            Batal
+          </Button>
+          <Button
+            type="button"
+            variant={confirmationCopy.danger ? "danger" : "primary"}
+            className={confirmationCopy.danger ? "admin-confirm-danger" : ""}
+            disabled={confirmationBusy}
+            onClick={handleConfirmation}
+          >
+            {confirmationCopy.danger && <Icon name="trash" size={18} />}
+            {confirmationBusy ? "Memproses..." : confirmationCopy.confirmLabel}
+          </Button>
         </div>
-      )}
-
-      {successMessage && (
-        <div className="admin-message success">
-          ✓ {successMessage}
-        </div>
-      )}
-
-      {activeTab === "overview" && (
-        <>
-          <section className="admin-section-heading">
-            <div>
-              <span>Ringkasan sistem</span>
-              <h2>Kondisi SawitVision saat ini</h2>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                loadStats();
-                loadStorage();
-              }}
-            >
-              ↻ Muat ulang
-            </button>
-          </section>
-
-          <section className="admin-stat-grid admin-overview-grid">
-            <article>
-              <i>👥</i>
-              <div>
-                <small>Total pengguna</small>
-                <strong>{totalUsers}</strong>
-                <span>
-                  Seluruh akun terdaftar
-                </span>
-              </div>
-            </article>
-
-            <article>
-              <i>✅</i>
-              <div>
-                <small>User aktif</small>
-                <strong>{activeUsers}</strong>
-                <span>Akun yang dapat digunakan</span>
-              </div>
-            </article>
-
-            <article>
-              <i>📷</i>
-              <div>
-                <small>Foto tersimpan</small>
-                <strong>{totalImages}</strong>
-                <span>Record hasil klasifikasi</span>
-              </div>
-            </article>
-
-            <article>
-              <i>🌴</i>
-              <div>
-                <small>Total TBS</small>
-                <strong>
-                  {tbsDetailsUnavailable ? "—" : totalTbs}
-                </strong>
-                <span>
-                  {tbsDetailsUnavailable
-                    ? "Detail belum tersedia"
-                    : "Deteksi individual tersimpan"}
-                </span>
-              </div>
-            </article>
-
-            <article>
-              <i>🧾</i>
-              <div>
-                <small>Activity log</small>
-                <strong>{totalLogs}</strong>
-                <span>
-                  Aktivitas tercatat
-                </span>
-              </div>
-            </article>
-
-            <article>
-              <i>🗂️</i>
-              <div>
-                <small>Penggunaan storage</small>
-                <strong>
-                  {storagePercentage.toFixed(1)}%
-                </strong>
-                <span>
-                  Status {storageStatusLabel}
-                </span>
-              </div>
-            </article>
-          </section>
-
-          <section className="admin-two-column">
-            <ImageDistributionPanel
-              imageByClass={imageByClass}
-              predictionByClass={predictionByClass}
-            />
-
-            <article className="admin-panel">
-              <div className="admin-panel-title">
-                <div>
-                  <span>Status pengguna</span>
-                  <h3>Komposisi akun</h3>
-                </div>
-              </div>
-
-              <div className="admin-user-summary">
-                <div>
-                  <span>Aktif</span>
-                  <strong>
-                    {stats?.users?.active || 0}
-                  </strong>
-                </div>
-
-                <div>
-                  <span>User biasa</span>
-                  <strong>
-                    {stats?.users?.regular || 0}
-                  </strong>
-                </div>
-
-                <div>
-                  <span>Administrator</span>
-                  <strong>
-                    {stats?.users?.admin || 0}
-                  </strong>
-                </div>
-              </div>
-            </article>
-          </section>
-
-          <TbsDistributionPanel
-            tbsByClass={tbsByClass}
-            avgDetectorConfidence={tbsStats?.avg_detector_confidence}
-            detailsUnavailable={tbsDetailsUnavailable}
-            coverageMessage={coverageMessage}
-            coverageCaption={coverageCaption}
-            coverageStatus={coverageStatus}
-          />
-
-          <section className="admin-panel admin-recent">
-            <div className="admin-panel-title">
-              <div>
-                <span>Terbaru</span>
-                <h3>Prediksi terakhir</h3>
-              </div>
-            </div>
-
-            {isLoadingStats ? (
-              <div className="admin-loading">
-                Memuat data...
-              </div>
-            ) : recentPredictions.length === 0 ? (
-              <div className="admin-empty">
-                Belum ada prediksi.
-              </div>
-            ) : (
-              <div className="admin-table-wrap">
-                <table className="admin-table">
-                  <thead>
-                    <tr>
-                      <th>Pengguna</th>
-                      <th>Hasil</th>
-                      <th>Confidence</th>
-                      <th>Waktu</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {recentPredictions.map(
-                      (item) => {
-                        const meta =
-                          CLASS_META[
-                            item.predicted_class
-                          ] || {
-                            label:
-                              item.predicted_class,
-                            icon: "🌴",
-                          };
-
-                        return (
-                          <tr key={item.id}>
-                            <td>
-                              <strong>
-                                {item.user_name}
-                              </strong>
-                              <small>
-                                {item.user_phone}
-                              </small>
-                            </td>
-
-                            <td>
-                              {meta.icon}{" "}
-                              {meta.label}
-                            </td>
-
-                            <td>
-                              {formatConfidence(
-                                item.confidence
-                              )}
-                            </td>
-
-                            <td>
-                              {formatDate(
-                                item.created_at
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      }
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-        </>
-      )}
-
-      {activeTab === "users" && (
-        <>
-          <section className="admin-section-heading">
-            <div>
-              <span>Manajemen pengguna</span>
-              <h2>Kelola akun yang terdaftar</h2>
-            </div>
-          </section>
-
-          <section className="admin-toolbar">
-            <div className="admin-search">
-              <span>🔎</span>
-              <input
-                type="search"
-                value={usersSearch}
-                onChange={(event) =>
-                  setUsersSearch(
-                    event.target.value
-                  )
-                }
-                placeholder="Cari nama atau nomor telepon..."
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    loadUsers();
-                  }
-                }}
-              />
-            </div>
-
-            <button
-              type="button"
-              onClick={loadUsers}
-              disabled={isLoadingUsers}
-            >
-              Cari
-            </button>
-          </section>
-
-          <section className="admin-panel">
-            {isLoadingUsers ? (
-              <div className="admin-loading">
-                Memuat pengguna...
-              </div>
-            ) : users.length === 0 ? (
-              <div className="admin-empty">
-                Pengguna tidak ditemukan.
-              </div>
-            ) : (
-              <div className="admin-table-wrap">
-                <table className="admin-table">
-                  <thead>
-                    <tr>
-                      <th>Pengguna</th>
-                      <th>Role</th>
-                      <th>Foto tersimpan</th>
-                      <th>Status</th>
-                      <th>Aksi</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {users.map((user) => (
-                      <tr key={user.id}>
-                        <td>
-                          <strong>
-                            {user.name}
-                          </strong>
-                          <small>
-                            {user.phone_number}
-                          </small>
-                        </td>
-
-                        <td>
-                          <span className="admin-role-badge">
-                            {user.role === "admin"
-                              ? "Admin"
-                              : "User"}
-                          </span>
-                        </td>
-
-                        <td>
-                          {user.total_predictions}
-                        </td>
-
-                        <td>
-                          <span
-                            className={`admin-status-badge ${
-                              user.is_active
-                                ? "active"
-                                : "inactive"
-                            }`}
-                          >
-                            {user.is_active
-                              ? "Aktif"
-                              : "Nonaktif"}
-                          </span>
-                        </td>
-
-                        <td>
-                          {user.role === "admin" ? (
-                            <span className="admin-muted">
-                              Dilindungi
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              className={
-                                user.is_active
-                                  ? "admin-danger-button"
-                                  : "admin-success-button"
-                              }
-                              onClick={() =>
-                                handleUserStatus(
-                                  user
-                                )
-                              }
-                              disabled={
-                                actionUserId ===
-                                user.id
-                              }
-                            >
-                              {actionUserId === user.id
-                                ? "Memproses..."
-                                : user.is_active
-                                ? "Nonaktifkan"
-                                : "Aktifkan"}
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-        </>
-      )}
-
-      {activeTab === "predictions" && (
-        <>
-          <section className="admin-section-heading">
-            <div>
-              <span>Data prediksi</span>
-              <h2>Statistik foto dan TBS</h2>
-            </div>
-          </section>
-
-          <section className="admin-stat-grid admin-prediction-summary">
-            <article>
-              <i>📷</i>
-              <div>
-                <small>Foto tersimpan</small>
-                <strong>{totalImages}</strong>
-                <span>Jumlah prediction record</span>
-              </div>
-            </article>
-
-            <article>
-              <i>🌴</i>
-              <div>
-                <small>Total TBS</small>
-                <strong>
-                  {tbsDetailsUnavailable ? "—" : totalTbs}
-                </strong>
-                <span>
-                  {tbsDetailsUnavailable
-                    ? "Detail belum tersedia"
-                    : "Berdasarkan detail multi-deteksi"}
-                </span>
-              </div>
-            </article>
-          </section>
-
-          <section className="admin-two-column">
-            <ImageDistributionPanel
-              imageByClass={imageByClass}
-              predictionByClass={predictionByClass}
-            />
-
-            <TbsDistributionPanel
-              tbsByClass={tbsByClass}
-              avgDetectorConfidence={tbsStats?.avg_detector_confidence}
-              detailsUnavailable={tbsDetailsUnavailable}
-              coverageMessage={coverageMessage}
-              coverageCaption={coverageCaption}
-              coverageStatus={coverageStatus}
-            />
-          </section>
-
-          <section className="admin-panel admin-recent">
-            <div className="admin-panel-title">
-              <div>
-                <span>10 data terakhir</span>
-                <h3>Prediksi terbaru</h3>
-              </div>
-            </div>
-
-            <div className="admin-table-wrap">
-              <table className="admin-table">
-                <thead>
-                  <tr>
-                    <th>Pengguna</th>
-                    <th>Kelas</th>
-                    <th>Confidence</th>
-                    <th>Waktu</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {recentPredictions.map(
-                    (item) => (
-                      <tr key={item.id}>
-                        <td>
-                          <strong>
-                            {item.user_name}
-                          </strong>
-                          <small>
-                            {item.user_phone}
-                          </small>
-                        </td>
-
-                        <td>
-                          {CLASS_META[
-                            item.predicted_class
-                          ]?.icon || "🌴"}{" "}
-                          {CLASS_META[
-                            item.predicted_class
-                          ]?.label ||
-                            item.predicted_class}
-                        </td>
-
-                        <td>
-                          {formatConfidence(
-                            item.confidence
-                          )}
-                        </td>
-
-                        <td>
-                          {formatDate(
-                            item.created_at
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </>
-      )}
-
-      {activeTab === "activity" && (
-        <>
-          <section className="admin-section-heading">
-            <div>
-              <span>Catatan sistem</span>
-              <h2>Activity log</h2>
-            </div>
-
-            <button
-              type="button"
-              className="admin-clean-button"
-              onClick={handleActivityCleanup}
-              disabled={isCleaningLogs}
-            >
-              {isCleaningLogs
-                ? "Membersihkan..."
-                : "Bersihkan > 90 hari"}
-            </button>
-          </section>
-
-          <section className="admin-toolbar">
-            <div className="admin-search">
-              <span>🔎</span>
-
-              <input
-                type="search"
-                value={activitySearch}
-                onChange={(event) =>
-                  setActivitySearch(
-                    event.target.value
-                  )
-                }
-                placeholder="Cari aktivitas..."
-              />
-            </div>
-
-            <button
-              type="button"
-              onClick={loadActivity}
-            >
-              Cari
-            </button>
-          </section>
-
-          <section className="admin-panel">
-            {isLoadingActivity ? (
-              <div className="admin-loading">
-                Memuat aktivitas...
-              </div>
-            ) : activityLogs.length === 0 ? (
-              <div className="admin-empty">
-                Belum ada activity log.
-              </div>
-            ) : (
-              <div className="admin-log-list">
-                {activityLogs.map((log) => (
-                  <article key={log.id}>
-                    <div className="admin-log-icon">
-                      🧾
-                    </div>
-
-                    <div className="admin-log-content">
-                      <div>
-                        <strong>
-                          {log.action}
-                        </strong>
-
-                        <span>
-                          {formatDate(
-                            log.created_at
-                          )}
-                        </span>
-                      </div>
-
-                      <p>
-                        {log.description ||
-                          "Aktivitas sistem"}
-                      </p>
-
-                      <small>
-                        Pelaku:{" "}
-                        {log.actor_user?.name ||
-                          "-"}
-                        {" • "}
-                        Target:{" "}
-                        {log.target_user?.name ||
-                          "-"}
-                      </small>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </section>
-        </>
-      )}
-
-      {activeTab === "storage" && (
-        <>
-          <section className="admin-section-heading">
-            <div>
-              <span>Penyimpanan gambar</span>
-              <h2>Storage SawitVision</h2>
-            </div>
-
-            <button
-              type="button"
-              className="admin-clean-button"
-              onClick={handleStorageCleanup}
-              disabled={isCleaningStorage}
-            >
-              {isCleaningStorage
-                ? "Membersihkan..."
-                : "Bersihkan gambar lama"}
-            </button>
-          </section>
-
-          {isLoadingStorage ? (
-            <section className="admin-panel">
-              <div className="admin-loading">
-                Memuat storage...
-              </div>
-            </section>
-          ) : (
-            <>
-              <section className="admin-storage-card">
-                <div className="admin-storage-top">
-                  <div>
-                    <span>Status storage</span>
-                    <h2>
-                      {storageStatusLabel}
-                    </h2>
-                    <p>
-                      {storageStats?.message ||
-                        "Belum ada informasi."}
-                    </p>
-                  </div>
-
-                  <strong>
-                    {storagePercentage.toFixed(2)}%
-                  </strong>
-                </div>
-
-                <div className="admin-storage-track">
-                  <span
-                    style={{
-                      width: `${Math.min(
-                        storagePercentage,
-                        100
-                      )}%`,
-                    }}
-                  />
-                </div>
-
-                <div className="admin-storage-details">
-                  <div>
-                    <small>Terpakai</small>
-                    <strong>
-                      {storageStats?.usage
-                        ?.estimated_mb || 0}{" "}
-                      MB
-                    </strong>
-                  </div>
-
-                  <div>
-                    <small>Sisa</small>
-                    <strong>
-                      {storageStats?.remaining
-                        ?.mb || 0}{" "}
-                      MB
-                    </strong>
-                  </div>
-
-                  <div>
-                    <small>Batas</small>
-                    <strong>
-                      {storageStats?.limit
-                        ?.gb || 0}{" "}
-                      GB
-                    </strong>
-                  </div>
-
-                  <div>
-                    <small>Objek file</small>
-                    <strong>
-                      {storageStats?.files
-                        ?.total_storage_objects ||
-                        0}
-                    </strong>
-                  </div>
-                </div>
-              </section>
-
-              <section className="admin-notice">
-                💡 Cleanup storage hanya menghapus
-                file gambar lama. Record hasil
-                prediksi tetap disimpan di database.
-              </section>
-            </>
-          )}
-        </>
-      )}
-
-      {activeTab === "reports" && (
-        <>
-          <section className="admin-section-heading">
-            <div>
-              <span>Laporan Excel</span>
-              <h2>Unduh laporan prediksi</h2>
-            </div>
-          </section>
-
-          <section className="admin-report-card">
-            <div className="admin-report-intro">
-              <div>📄</div>
-              <div>
-                <h3>Laporan Global SawitVision</h3>
-                <p>
-                  Gunakan filter bila diperlukan,
-                  lalu unduh seluruh hasil prediksi
-                  dalam format Excel.
-                </p>
-              </div>
-            </div>
-
-            <div className="admin-report-form">
-              <label>
-                <span>Tanggal awal</span>
-                <input
-                  type="date"
-                  value={
-                    reportFilter.start_date
-                  }
-                  onChange={(event) =>
-                    setReportFilter(
-                      (current) => ({
-                        ...current,
-                        start_date:
-                          event.target.value,
-                      })
-                    )
-                  }
-                />
-              </label>
-
-              <label>
-                <span>Tanggal akhir</span>
-                <input
-                  type="date"
-                  value={reportFilter.end_date}
-                  onChange={(event) =>
-                    setReportFilter(
-                      (current) => ({
-                        ...current,
-                        end_date:
-                          event.target.value,
-                      })
-                    )
-                  }
-                />
-              </label>
-
-              <label>
-                <span>Kelas</span>
-                <select
-                  value={
-                    reportFilter.predicted_class
-                  }
-                  onChange={(event) =>
-                    setReportFilter(
-                      (current) => ({
-                        ...current,
-                        predicted_class:
-                          event.target.value,
-                      })
-                    )
-                  }
-                >
-                  <option value="">
-                    Semua kelas
-                  </option>
-                  <option value="belum_masak">
-                    Belum Masak
-                  </option>
-                  <option value="masak">
-                    Masak
-                  </option>
-                  <option value="terlalu_masak">
-                    Terlalu Masak
-                  </option>
-                </select>
-              </label>
-            </div>
-
-            <button
-              type="button"
-              className="admin-download-button"
-              onClick={handleDownloadReport}
-              disabled={isDownloadingReport}
-            >
-              {isDownloadingReport
-                ? "Menyiapkan laporan..."
-                : "⬇️ Unduh laporan Excel"}
-            </button>
-          </section>
-        </>
-      )}
+      </Modal>
     </main>
   );
 }

@@ -1,126 +1,111 @@
-function HomePage({ currentUser, onStartPrediction, onOpenHistory }) {
-  const firstName = currentUser?.name?.trim().split(" ")[0] || "Pengguna";
+import Button from "../components/ui/Button";
+import Card from "../components/ui/Card";
+import Icon from "../components/ui/Icon";
+import MaturityBadge from "../components/MaturityBadge";
+
+const MATURITY_GUIDE = [
+  {
+    key: "belum_masak",
+    description: "TBS belum mencapai kondisi panen optimal dan perlu diperiksa kembali.",
+  },
+  {
+    key: "masak",
+    description: "TBS berada pada tingkat kematangan yang sesuai untuk diprioritaskan saat panen.",
+  },
+  {
+    key: "terlalu_masak",
+    description: "TBS telah melewati kematangan optimal dan sebaiknya segera ditangani.",
+  },
+];
+
+function QuickAction({ icon, title, description, onClick }) {
+  return (
+    <button type="button" className="home-quick-card" onClick={onClick}>
+      <span className="home-quick-icon" aria-hidden="true"><Icon name={icon} size={22} /></span>
+      <span>
+        <strong>{title}</strong>
+        <small>{description}</small>
+      </span>
+      <Icon name="chevron" size={19} />
+    </button>
+  );
+}
+
+function HomePage({ currentUser, onStartPrediction, onOpenHistory, onOpenProfile }) {
+  const displayName = currentUser?.full_name || currentUser?.name || "Pengguna";
+  const firstName = displayName.trim().split(/\s+/)[0];
 
   return (
     <main className="home-page">
       <section className="home-hero">
         <div className="home-hero-content">
-          <span className="home-hero-badge">🌿 Sistem klasifikasi sawit</span>
-
-          <h1>Halo, {firstName}!</h1>
-
+          <p className="home-hero-eyebrow">SawitVision · Halo, {firstName}</p>
+          <h1>Analisis kematangan TBS untuk pekerjaan lapangan</h1>
           <p>
-            Kenali tingkat kematangan buah kelapa sawit menggunakan teknologi
-            kecerdasan buatan.
+            SawitVision membantu mendeteksi TBS dari foto, mengklasifikasikan
+            kematangan, menyimpan lokasi pengambilan, dan mencatat hasilnya.
           </p>
-
-          <button
-            type="button"
-            className="home-primary-button"
-            onClick={onStartPrediction}
-          >
-            <span>📷</span>
-            Mulai klasifikasi
-          </button>
-        </div>
-
-        <div className="home-hero-visual">
-          <div className="home-palm-circle">🌴</div>
-        </div>
-      </section>
-
-      <section className="home-section">
-        <div className="home-section-heading">
-          <div>
-            <span className="home-section-eyebrow">Tingkat kematangan</span>
-
-            <h2>Kategori hasil klasifikasi</h2>
+          <div className="home-hero-actions">
+            <Button type="button" onClick={onStartPrediction}>
+              <Icon name="camera" />
+              Mulai prediksi
+            </Button>
+            <Button type="button" variant="secondary" onClick={onOpenHistory}>
+              <Icon name="history" />
+              Lihat riwayat
+            </Button>
           </div>
         </div>
 
-        <div className="maturity-grid">
-          <article className="maturity-card">
-            <div className="maturity-card-icon">🟢</div>
-
-            <div>
-              <h3>Belum Matang</h3>
-              <p>
-                Buah masih dalam tahap awal dan belum mencapai kondisi panen
-                optimal.
-              </p>
-            </div>
-          </article>
-
-          <article className="maturity-card">
-            <div className="maturity-card-icon">🟠</div>
-
-            <div>
-              <h3>Matang</h3>
-              <p>
-                Buah telah mencapai tingkat kematangan yang sesuai untuk proses
-                pemanenan.
-              </p>
-            </div>
-          </article>
-
-          <article className="maturity-card">
-            <div className="maturity-card-icon">🔴</div>
-
-            <div>
-              <h3>Terlalu Matang</h3>
-              <p>
-                Buah telah melewati tingkat kematangan optimal dan sebaiknya
-                segera ditangani.
-              </p>
-            </div>
-          </article>
+        <div className="home-hero-panel" aria-label="Alur kerja SawitVision">
+          <span className="home-hero-mark" aria-hidden="true"><Icon name="leaf" size={28} /></span>
+          <strong>Alur analisis sederhana</strong>
+          <ol>
+            <li>Ambil atau pilih foto</li>
+            <li>Sistem mendeteksi setiap TBS</li>
+            <li>Kematangan diklasifikasikan</li>
+            <li>Hasil dan lokasi disimpan</li>
+          </ol>
         </div>
       </section>
 
-      <section className="home-quick-section">
-        <button
-          type="button"
-          className="home-quick-card"
-          onClick={onStartPrediction}
-        >
-          <span className="home-quick-icon">📸</span>
-
-          <span>
-            <strong>Klasifikasi gambar</strong>
-            <small>Ambil foto atau pilih gambar dari galeri</small>
-          </span>
-
-          <span className="home-quick-arrow">›</span>
-        </button>
-
-        <button
-          type="button"
-          className="home-quick-card"
-          onClick={onOpenHistory}
-        >
-          <span className="home-quick-icon">📈</span>
-
-          <span>
-            <strong>Lihat riwayat</strong>
-            <small>Periksa kembali hasil klasifikasi sebelumnya</small>
-          </span>
-
-          <span className="home-quick-arrow">›</span>
-        </button>
+      <section className="home-section" aria-labelledby="home-actions-title">
+        <header className="home-section-heading">
+          <p>Akses Cepat</p>
+          <h2 id="home-actions-title">Lanjutkan pekerjaan</h2>
+        </header>
+        <div className="home-quick-section">
+          <QuickAction icon="scan" title="Prediksi TBS" description="Gunakan kamera atau foto dari galeri" onClick={onStartPrediction} />
+          <QuickAction icon="history" title="Riwayat hasil" description="Tinjau foto, lokasi, dan detail deteksi" onClick={onOpenHistory} />
+          <QuickAction icon="profile" title="Profil pengguna" description="Kelola informasi akun Anda" onClick={onOpenProfile} />
+        </div>
       </section>
 
-      <section className="home-information-card">
-        <div className="home-information-icon">💡</div>
+      <section className="home-section" aria-labelledby="home-maturity-title">
+        <header className="home-section-heading">
+          <p>Panduan Hasil</p>
+          <h2 id="home-maturity-title">Kategori kematangan</h2>
+        </header>
+        <div className="maturity-grid">
+          {MATURITY_GUIDE.map((item) => (
+            <Card as="article" className="maturity-card" key={item.key}>
+              <MaturityBadge value={item.key} />
+              <p>{item.description}</p>
+            </Card>
+          ))}
+        </div>
+      </section>
 
+      <Card className="home-information-card" variant="subtle">
+        <Icon name="info" size={22} />
         <div>
-          <h3>Tips pengambilan gambar</h3>
-
+          <h2>Foto yang baik membantu pemeriksaan</h2>
           <p>
-            Gunakan pencahayaan yang cukup, pastikan buah terlihat jelas, dan
-            hindari gambar yang terlalu gelap atau buram.
+            Pastikan TBS terlihat utuh, pencahayaan cukup, dan gambar tidak
+            buram sebelum memulai prediksi.
           </p>
         </div>
-      </section>
+      </Card>
     </main>
   );
 }

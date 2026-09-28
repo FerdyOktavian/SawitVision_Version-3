@@ -7,72 +7,29 @@ import {
   getPredictions,
   updatePredictionLocationLabel,
 } from "../services/api";
+import Alert from "../components/ui/Alert";
+import Button from "../components/ui/Button";
+import Card from "../components/ui/Card";
+import EmptyState from "../components/ui/EmptyState";
+import FormField from "../components/ui/FormField";
+import Icon from "../components/ui/Icon";
+import IconButton from "../components/ui/IconButton";
+import LoadingState from "../components/ui/LoadingState";
+import Modal from "../components/ui/Modal";
+import PageHeader from "../components/ui/PageHeader";
+import StatCard from "../components/ui/StatCard";
+import LocationSummary from "../components/LocationSummary";
+import MaturityBadge from "../components/MaturityBadge";
+import ProbabilityBar from "../components/ProbabilityBar";
+import {
+  MATURITY_META as CLASS_META,
+  formatConfidence,
+  formatDateTime as formatDate,
+  formatMaturityLabel as formatClassLabel,
+  normalizeMaturityClass as normalizeClassName,
+} from "../utils/presentation";
 
-const CLASS_META = {
-  belum_masak: {
-    label: "Belum Masak",
-    icon: "🟢",
-  },
-  masak: {
-    label: "Matang",
-    icon: "🟠",
-  },
-  terlalu_masak: {
-    label: "Terlalu Matang",
-    icon: "🔴",
-  },
-};
-
-const TBS_CLASS_LABELS = {
-  belum_masak: "Belum Matang",
-  masak: "Matang",
-  terlalu_masak: "Terlalu Matang",
-};
-
-function normalizeClassName(value = "") {
-  return String(value).trim().toLowerCase().replace(/\s+/g, "_");
-}
-
-function formatDate(value) {
-  if (!value) {
-    return "-";
-  }
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return "-";
-  }
-
-  return new Intl.DateTimeFormat("id-ID", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
-}
-
-function formatConfidence(value) {
-  const numberValue = Number(value || 0);
-
-  if (!Number.isFinite(numberValue)) {
-    return "0.00";
-  }
-
-  return (numberValue <= 1 ? numberValue * 100 : numberValue).toFixed(2);
-}
-
-function formatClassLabel(value) {
-  const normalized = normalizeClassName(value);
-
-  if (CLASS_META[normalized]) {
-    return CLASS_META[normalized].label;
-  }
-
-  return normalized
-    .split("_")
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ") || "Tidak diketahui";
-}
+const HISTORY_PAGE_SIZE = 30;
 
 function formatInputSource(value) {
   const normalized = String(value || "").trim().toLowerCase();
@@ -96,19 +53,6 @@ function formatFileSize(value) {
   }
 
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-}
-
-function getValidCoordinate(value, minimum, maximum) {
-  if (value === null || value === undefined || value === "") {
-    return null;
-  }
-
-  const coordinate = Number(value);
-  return Number.isFinite(coordinate) &&
-    coordinate >= minimum &&
-    coordinate <= maximum
-    ? coordinate
-    : null;
 }
 
 function toSafeCount(value, fallback = 0) {
@@ -138,8 +82,70 @@ function getHistoryItems(response) {
   return [];
 }
 
+function getHistoryTotal(statsResponse) {
+  const candidates = [
+    statsResponse?.image_stats?.total_images,
+    statsResponse?.total_predictions,
+    statsResponse?.total,
+  ];
+
+  for (const candidate of candidates) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value >= 0) return Math.trunc(value);
+  }
+
+  return null;
+}
+
+function getPaginationItems(currentPage, totalPages) {
+  if (!Number.isFinite(totalPages) || totalPages < 1) return [];
+
+  const pageNumbers = new Set([1, totalPages]);
+
+  for (
+    let page = Math.max(1, currentPage - 1);
+    page <= Math.min(totalPages, currentPage + 1);
+    page += 1
+  ) {
+    pageNumbers.add(page);
+  }
+
+  if (currentPage <= 3) {
+    for (let page = 1; page <= Math.min(4, totalPages); page += 1) {
+      pageNumbers.add(page);
+    }
+  }
+
+  if (currentPage >= totalPages - 2) {
+    for (
+      let page = Math.max(1, totalPages - 3);
+      page <= totalPages;
+      page += 1
+    ) {
+      pageNumbers.add(page);
+    }
+  }
+
+  const sortedPages = [...pageNumbers].sort((a, b) => a - b);
+  const items = [];
+
+  sortedPages.forEach((page, index) => {
+    const previousPage = sortedPages[index - 1];
+
+    if (previousPage && page - previousPage > 1) {
+      items.push(`ellipsis-${previousPage}-${page}`);
+    }
+
+    items.push(page);
+  });
+
+  return items;
+}
+
 function HistoryPage({ onStartPrediction }) {
   const detailRequestRef = useRef(0);
+  const historyListRef = useRef(null);
+  const pageRequestInFlightRef = useRef(false);
   const [historyItems, setHistoryItems] = useState([]);
   const [stats, setStats] = useState(null);
 
@@ -147,8 +153,14 @@ function HistoryPage({ onStartPrediction }) {
   const [classFilter, setClassFilter] = useState("all");
 
   const [isLoading, setIsLoading] = useState(true);
+  const [isPageLoading, setIsPageLoading] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
   const [deletingId, setDeletingId] = useState("");
+  const [deleteCandidate, setDeleteCandidate] = useState(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [reportStartDate, setReportStartDate] = useState("");
+  const [reportEndDate, setReportEndDate] = useState("");
+  const [reportDateError, setReportDateError] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [selectedHistoryItem, setSelectedHistoryItem] = useState(null);
   const [predictionDetail, setPredictionDetail] = useState(null);
@@ -161,25 +173,35 @@ function HistoryPage({ onStartPrediction }) {
   const [locationLabelError, setLocationLabelError] = useState("");
 
   const loadHistory = async () => {
-    setIsLoading(true);
+    if (pageRequestInFlightRef.current) return;
+
+    pageRequestInFlightRef.current = true;
+    setIsPageLoading(true);
     setErrorMessage("");
 
     try {
-      const [historyResponse, statsResponse] = await Promise.all([
-        getPredictions({
-          limit: 100,
-          offset: 0,
-        }),
-        getPredictionStats(),
-      ]);
+      const statsResponse = await getPredictionStats();
+      const updatedTotal = getHistoryTotal(statsResponse);
+      const updatedTotalPages = updatedTotal === null
+        ? null
+        : Math.max(1, Math.ceil(updatedTotal / HISTORY_PAGE_SIZE));
+      const safePage = updatedTotalPages === null
+        ? currentPage
+        : Math.min(currentPage, updatedTotalPages);
+      const historyResponse = await getPredictions({
+        limit: HISTORY_PAGE_SIZE,
+        offset: (safePage - 1) * HISTORY_PAGE_SIZE,
+      });
 
-      setHistoryItems(getHistoryItems(historyResponse));
-
+      const items = getHistoryItems(historyResponse);
+      setHistoryItems(items);
+      setCurrentPage(safePage);
       setStats(statsResponse);
     } catch (error) {
       setErrorMessage(error.message || "Riwayat prediksi gagal dimuat.");
     } finally {
-      setIsLoading(false);
+      pageRequestInFlightRef.current = false;
+      setIsPageLoading(false);
     }
   };
 
@@ -188,7 +210,7 @@ function HistoryPage({ onStartPrediction }) {
 
     Promise.all([
       getPredictions({
-        limit: 100,
+        limit: HISTORY_PAGE_SIZE,
         offset: 0,
       }),
       getPredictionStats(),
@@ -196,7 +218,8 @@ function HistoryPage({ onStartPrediction }) {
       .then(([historyResponse, statsResponse]) => {
         if (isCancelled) return;
 
-        setHistoryItems(getHistoryItems(historyResponse));
+        const items = getHistoryItems(historyResponse);
+        setHistoryItems(items);
         setStats(statsResponse);
       })
       .catch((error) => {
@@ -215,35 +238,71 @@ function HistoryPage({ onStartPrediction }) {
     };
   }, []);
 
-  useEffect(() => {
-    if (!selectedHistoryItem) {
-      return undefined;
+  const changeHistoryPage = async (nextPage) => {
+    const historyTotal = getHistoryTotal(stats);
+    const totalPages = historyTotal === null
+      ? null
+      : Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
+    const safePage = totalPages === null
+      ? Math.max(1, nextPage)
+      : Math.min(Math.max(1, nextPage), totalPages);
+
+    if (
+      safePage === currentPage ||
+      pageRequestInFlightRef.current
+    ) {
+      return;
     }
 
-    const previousOverflow = document.body.style.overflow;
-    const handleEscape = (event) => {
-      if (event.key === "Escape") {
-        detailRequestRef.current += 1;
-        setSelectedHistoryItem(null);
-        setPredictionDetail(null);
-        setDetailError("");
-        setIsDetailLoading(false);
-        setFailedDetailImages({});
-        setIsEditingLocationLabel(false);
-        setLocationLabelDraft("");
-        setIsSavingLocationLabel(false);
-        setLocationLabelError("");
+    pageRequestInFlightRef.current = true;
+    setIsPageLoading(true);
+    setErrorMessage("");
+
+    try {
+      const historyResponse = await getPredictions({
+        limit: HISTORY_PAGE_SIZE,
+        offset: (safePage - 1) * HISTORY_PAGE_SIZE,
+      });
+      const nextItems = getHistoryItems(historyResponse);
+
+      if (nextItems.length === 0 && safePage > 1) {
+        const statsResponse = await getPredictionStats();
+        const updatedTotal = getHistoryTotal(statsResponse);
+        const fallbackPage = updatedTotal === null
+          ? Math.max(1, safePage - 1)
+          : Math.max(1, Math.ceil(updatedTotal / HISTORY_PAGE_SIZE));
+        const fallbackResponse = await getPredictions({
+          limit: HISTORY_PAGE_SIZE,
+          offset: (fallbackPage - 1) * HISTORY_PAGE_SIZE,
+        });
+
+        setHistoryItems(getHistoryItems(fallbackResponse));
+        setCurrentPage(fallbackPage);
+        setStats(statsResponse);
+      } else {
+        setHistoryItems(nextItems);
+        setCurrentPage(safePage);
       }
-    };
 
-    document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", handleEscape);
+      window.requestAnimationFrame(() => {
+        const reduceMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
 
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", handleEscape);
-    };
-  }, [selectedHistoryItem]);
+        historyListRef.current?.scrollIntoView({
+          behavior: reduceMotion ? "auto" : "smooth",
+          block: "start",
+        });
+      });
+    } catch (error) {
+      setErrorMessage(
+        error.message || "Halaman riwayat gagal dimuat.",
+      );
+    } finally {
+      pageRequestInFlightRef.current = false;
+      setIsPageLoading(false);
+    }
+  };
 
   const filteredItems = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -385,50 +444,65 @@ function HistoryPage({ onStartPrediction }) {
     }
   };
 
-  const handleCardKeyDown = (event, item) => {
-    if (event.target !== event.currentTarget) {
-      return;
-    }
-
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      openPredictionDetail(item);
-    }
-  };
-
   const handleDelete = async (recordId) => {
-    const isConfirmed = window.confirm("Hapus riwayat prediksi ini?");
+    if (pageRequestInFlightRef.current) return;
 
-    if (!isConfirmed) {
-      return;
-    }
-
+    pageRequestInFlightRef.current = true;
     setDeletingId(recordId);
+    setIsPageLoading(true);
+    setDeleteCandidate(null);
     setErrorMessage("");
 
     try {
       await deletePrediction(recordId);
-
-      setHistoryItems((previousItems) =>
-        previousItems.filter((item) => item.id !== recordId),
-      );
-
       const updatedStats = await getPredictionStats();
+      const updatedTotal = getHistoryTotal(updatedStats);
+      const updatedTotalPages = updatedTotal === null
+        ? Math.max(1, currentPage)
+        : Math.max(1, Math.ceil(updatedTotal / HISTORY_PAGE_SIZE));
+      const safePage = Math.min(currentPage, updatedTotalPages);
+      const historyResponse = await getPredictions({
+        limit: HISTORY_PAGE_SIZE,
+        offset: (safePage - 1) * HISTORY_PAGE_SIZE,
+      });
 
+      setHistoryItems(getHistoryItems(historyResponse));
+      setCurrentPage(safePage);
       setStats(updatedStats);
     } catch (error) {
       setErrorMessage(error.message || "Riwayat gagal dihapus.");
     } finally {
+      pageRequestInFlightRef.current = false;
+      setIsPageLoading(false);
       setDeletingId("");
     }
   };
 
-  const handleExport = async () => {
+  const handleExport = async (event) => {
+    event?.preventDefault();
+
+    const hasStartDate = Boolean(reportStartDate);
+    const hasEndDate = Boolean(reportEndDate);
+
+    if (hasStartDate !== hasEndDate) {
+      setReportDateError("Pilih tanggal awal dan tanggal akhir.");
+      return;
+    }
+
+    if (hasStartDate && reportStartDate > reportEndDate) {
+      setReportDateError("Tanggal awal tidak boleh setelah tanggal akhir.");
+      return;
+    }
+
     setIsExporting(true);
+    setReportDateError("");
     setErrorMessage("");
 
     try {
-      await downloadMyPredictionReport();
+      await downloadMyPredictionReport({
+        startDate: reportStartDate || undefined,
+        endDate: reportEndDate || undefined,
+      });
     } catch (error) {
       setErrorMessage(error.message || "Laporan Excel gagal diunduh.");
     } finally {
@@ -442,6 +516,25 @@ function HistoryPage({ onStartPrediction }) {
       stats?.total_predictions ?? stats?.total,
       historyItems.length,
     ),
+  );
+  const historyTotal = getHistoryTotal(stats);
+  const totalPages = historyTotal === null
+    ? null
+    : Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
+  const pageStart = historyItems.length > 0
+    ? (currentPage - 1) * HISTORY_PAGE_SIZE + 1
+    : 0;
+  const pageEnd = historyItems.length > 0
+    ? pageStart + historyItems.length - 1
+    : 0;
+  const paginationItems = getPaginationItems(currentPage, totalPages);
+  const canGoToPreviousPage = currentPage > 1;
+  const canGoToNextPage = totalPages === null
+    ? historyItems.length === HISTORY_PAGE_SIZE
+    : currentPage < totalPages;
+  const isPaginationBusy = isPageLoading || Boolean(deletingId);
+  const hasActiveFilters = Boolean(
+    searchTerm.trim() || classFilter !== "all",
   );
   const tbsStats = stats?.tbs_stats;
   const totalTbs = toSafeCount(tbsStats?.total_tbs);
@@ -483,7 +576,6 @@ function HistoryPage({ onStartPrediction }) {
   const detailClassName = normalizeClassName(detailRecord?.predicted_class);
   const detailClassMeta = CLASS_META[detailClassName] || {
     label: formatClassLabel(detailClassName),
-    icon: "🌴",
   };
   const detailProbabilities = detailRecord?.probabilities || {};
   const detailDetections = Array.isArray(detailRecord?.detections)
@@ -510,26 +602,25 @@ function HistoryPage({ onStartPrediction }) {
       terlalu_masak: 0,
     },
   );
-  const detailSummary = {
-    total: toSafeCount(
-      detailRecord?.summary?.total_detections,
-      detailDetections.length,
-    ),
-    byClass: {
-      belum_masak: toSafeCount(
-        detailRecord?.summary?.by_class?.belum_masak,
-        detectionCountFallback.belum_masak,
-      ),
-      masak: toSafeCount(
-        detailRecord?.summary?.by_class?.masak,
-        detectionCountFallback.masak,
-      ),
-      terlalu_masak: toSafeCount(
-        detailRecord?.summary?.by_class?.terlalu_masak,
-        detectionCountFallback.terlalu_masak,
-      ),
-    },
+  const detailComposition = {
+    total: detailDetections.length,
+    byClass: detectionCountFallback,
   };
+  const compositionHighestCount = detailComposition.total > 0
+    ? Math.max(...Object.values(detailComposition.byClass))
+    : 0;
+  const compositionLeaders = compositionHighestCount > 0
+    ? Object.keys(detailComposition.byClass).filter(
+        (className) => detailComposition.byClass[className] === compositionHighestCount,
+      )
+    : [];
+  const dominantMaturityClass = compositionLeaders.length === 1
+    ? compositionLeaders[0]
+    : "";
+  const hasBalancedComposition = compositionLeaders.length > 1;
+  const showDominantConfidence = Boolean(
+    dominantMaturityClass && detailClassName === dominantMaturityClass,
+  );
   const detailImageCandidates = [
     detailRecord?.image_processed_url,
     detailRecord?.image_thumbnail_url,
@@ -543,282 +634,232 @@ function HistoryPage({ onStartPrediction }) {
   );
   const detailImageUrl = detailImageCandidates[0] || "";
   const detailLocation = detailRecord?.location || {};
-  const detailLatitude = getValidCoordinate(
-    detailLocation.latitude,
-    -90,
-    90,
-  );
-  const detailLongitude = getValidCoordinate(
-    detailLocation.longitude,
-    -180,
-    180,
-  );
-  const hasDetailLocation =
-    detailLocation.available === true &&
-    detailLatitude !== null &&
-    detailLongitude !== null;
-  const locationAccuracy = Number(detailLocation.accuracy_meters);
-  const hasLocationAccuracy =
-    detailLocation.accuracy_meters !== null &&
-    detailLocation.accuracy_meters !== undefined &&
-    detailLocation.accuracy_meters !== "" &&
-    Number.isFinite(locationAccuracy) && locationAccuracy >= 0;
-  const detailLocationLabel = String(detailLocation.label || "").trim();
   const detailLocationAutoName = String(
     detailLocation.auto_name || "",
   ).trim();
-  const locationAccuracyQuality = !hasLocationAccuracy
-    ? null
-    : locationAccuracy <= 50
-      ? { label: "Akurasi Tinggi", level: "high" }
-      : locationAccuracy <= 500
-        ? { label: "Akurasi Sedang", level: "medium" }
-        : { label: "Akurasi Rendah", level: "low" };
-  const locationMapUrl = hasDetailLocation
-    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-        `${detailLatitude},${detailLongitude}`,
-      )}`
-    : "";
 
   return (
     <main className="history-page">
-      <section className="history-hero">
-        <div>
-          <span className="history-eyebrow">Riwayat pengguna</span>
-
-          <h1>Hasil klasifikasi sebelumnya</h1>
-
-          <p>
-            Lihat kembali gambar, tingkat kematangan, dan keyakinan hasil
-            prediksi yang pernah dilakukan.
-          </p>
-        </div>
-
-        <button
-          type="button"
-          className="history-new-button"
-          onClick={onStartPrediction}
-        >
-          <span>📷</span>
-          Klasifikasi baru
-        </button>
-      </section>
+      <PageHeader
+        className="history-hero"
+        eyebrow="Riwayat Lapangan"
+        title="Hasil pemeriksaan sebelumnya"
+        description="Tinjau kembali foto, ringkasan kematangan, lokasi, dan detail setiap TBS."
+        actions={(
+          <Button type="button" onClick={onStartPrediction}>
+            <Icon name="camera" />
+            Prediksi baru
+          </Button>
+        )}
+      />
 
       <section
         className="history-statistics"
         aria-label="Statistik foto dan TBS"
       >
-        <div className="history-stats history-stats-overview">
-          <article>
-            <span className="history-stat-icon" aria-hidden="true">
-              📷
-            </span>
-
-            <div>
-              <small>Foto Tersimpan</small>
-              <strong>{totalImages}</strong>
-            </div>
-          </article>
-
-          <article>
-            <span className="history-stat-icon" aria-hidden="true">
-              🌴
-            </span>
-
-            <div>
-              <small>Total TBS</small>
-              <strong>{areTbsDetailsUnavailable ? "—" : totalTbs}</strong>
-            </div>
-          </article>
-        </div>
-
-        <div className="history-stats history-stats-maturity">
+        <div className="history-stats">
+          <StatCard icon="gallery" label="Foto Tersimpan" value={totalImages} />
+          <StatCard icon="scan" label="Total TBS" value={areTbsDetailsUnavailable ? "—" : totalTbs} />
           {Object.entries(CLASS_META).map(([className, meta]) => (
-            <article key={className}>
-              <span className="history-stat-icon" aria-hidden="true">
-                {meta.icon}
-              </span>
-
-              <div>
-                <small>{TBS_CLASS_LABELS[className] || meta.label}</small>
-                <strong>
-                  {areTbsDetailsUnavailable
-                    ? "—"
-                    : toSafeCount(tbsByClass?.[className]?.total)}
-                  {!areTbsDetailsUnavailable && (
-                    <span className="history-stat-unit"> TBS</span>
-                  )}
-                </strong>
-              </div>
-            </article>
+            <StatCard
+              key={className}
+              icon="scan"
+              label={meta.label}
+              value={areTbsDetailsUnavailable ? "—" : toSafeCount(tbsByClass?.[className]?.total)}
+              suffix={areTbsDetailsUnavailable ? "" : " TBS"}
+              tone={meta.tone}
+            />
           ))}
         </div>
 
         {coverageMessage && (
-          <p className="history-coverage-note" role="note">
-            <span aria-hidden="true">ⓘ</span>
-            {coverageMessage}
-          </p>
+          <Alert className="history-coverage-note" role="note">{coverageMessage}</Alert>
         )}
       </section>
 
       <section className="history-toolbar">
-        <div className="history-search">
-          <span>🔎</span>
-
+        <label className="history-search">
+          <span className="history-control-label">Cari riwayat</span>
+          <Icon name="scan" size={18} />
           <input
             type="search"
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
-            placeholder="Cari hasil klasifikasi..."
+            placeholder="Cari lokasi atau hasil..."
           />
-        </div>
+        </label>
 
-        <select
-          value={classFilter}
-          onChange={(event) => setClassFilter(event.target.value)}
-          aria-label="Filter ringkasan foto berdasarkan kelas"
-        >
-          <option value="all">Semua kelas</option>
+        <label className="history-filter">
+          <span className="history-control-label">Kematangan</span>
+          <select
+            value={classFilter}
+            onChange={(event) => setClassFilter(event.target.value)}
+          >
+            <option value="all">Semua kelas</option>
+            <option value="belum_masak">Belum Matang</option>
+            <option value="masak">Matang</option>
+            <option value="terlalu_masak">Terlalu Matang</option>
+          </select>
+        </label>
 
-          <option value="belum_masak">Belum Masak</option>
-
-          <option value="masak">Matang</option>
-
-          <option value="terlalu_masak">Terlalu Matang</option>
-        </select>
-
-        <button
+        <Button
           type="button"
-          className="history-refresh-button"
+          variant="secondary"
           onClick={loadHistory}
-          disabled={isLoading}
+          disabled={isLoading || isPaginationBusy}
         >
-          ↻ Muat ulang
-        </button>
-
-        <button
-          type="button"
-          className="history-export-button"
-          onClick={handleExport}
-          disabled={isLoading || isExporting || historyItems.length === 0}
-        >
-          {isExporting ? "⏳ Membuat laporan..." : "⬇️ Export Laporan Excel"}
-        </button>
+          <Icon name="refresh" />
+          Muat ulang
+        </Button>
       </section>
 
-      {errorMessage && <div className="history-alert">⚠️ {errorMessage}</div>}
-
-      {isLoading ? (
-        <section className="history-loading">
-          <div className="history-spinner" />
-          <h2>Memuat riwayat...</h2>
-          <p>Tunggu sebentar, data sedang diambil.</p>
-        </section>
-      ) : filteredItems.length === 0 ? (
-        <section className="history-empty">
-          <div>🌱</div>
-          <h2>Belum ada riwayat</h2>
+      <Card
+        className="history-report-card"
+        aria-labelledby="history-report-title"
+      >
+        <div className="history-report-heading">
+          <div>
+            <p>Laporan riwayat</p>
+            <h2 id="history-report-title">Rentang laporan</h2>
+          </div>
           <p>
-            Mulai klasifikasi buah sawit agar hasilnya tersimpan dan tampil di
-            halaman ini.
+            Pilih rentang tanggal, atau kosongkan keduanya untuk seluruh
+            riwayat.
           </p>
+        </div>
 
-          <button type="button" onClick={onStartPrediction}>
-            Mulai klasifikasi
-          </button>
-        </section>
+        <form className="history-report-form" onSubmit={handleExport}>
+          <FormField
+            id="history-report-start-date"
+            label="Dari tanggal"
+            type="date"
+            value={reportStartDate}
+            onChange={(event) => {
+              setReportStartDate(event.target.value);
+              setReportDateError("");
+            }}
+            disabled={isExporting}
+            aria-invalid={reportDateError ? "true" : undefined}
+            aria-describedby={reportDateError ? "history-report-error" : undefined}
+          />
+          <FormField
+            id="history-report-end-date"
+            label="Sampai tanggal"
+            type="date"
+            value={reportEndDate}
+            onChange={(event) => {
+              setReportEndDate(event.target.value);
+              setReportDateError("");
+            }}
+            disabled={isExporting}
+            aria-invalid={reportDateError ? "true" : undefined}
+            aria-describedby={reportDateError ? "history-report-error" : undefined}
+          />
+          <Button
+            type="submit"
+            variant="secondary"
+            disabled={isLoading || isExporting || historyItems.length === 0}
+            aria-busy={isExporting}
+          >
+            <Icon name="download" />
+            {isExporting ? "Mengekspor..." : "Export Excel"}
+          </Button>
+        </form>
+
+        {reportDateError && (
+          <Alert
+            id="history-report-error"
+            className="history-report-error"
+            tone="error"
+            role="alert"
+          >
+            {reportDateError}
+          </Alert>
+        )}
+      </Card>
+
+      {errorMessage && <Alert tone="error" role="alert">{errorMessage}</Alert>}
+
+      <div ref={historyListRef} className="history-list-anchor" />
+
+      {isLoading || isPageLoading ? (
+        <LoadingState title="Memuat riwayat..." description="Data pemeriksaan sedang diambil." />
+      ) : filteredItems.length === 0 ? (
+        <EmptyState
+          title={historyItems.length ? "Tidak ada hasil yang cocok" : "Belum ada riwayat"}
+          description={historyItems.length ? "Ubah kata pencarian atau filter kematangan." : "Mulai pemeriksaan TBS agar hasilnya tersimpan di halaman ini."}
+          actionLabel={historyItems.length ? undefined : "Mulai prediksi"}
+          onAction={historyItems.length ? undefined : onStartPrediction}
+        />
       ) : (
         <section className="history-grid">
           {filteredItems.map((item) => {
             const className = normalizeClassName(item.predicted_class);
-
             const meta = CLASS_META[className] || {
-              label: item.predicted_class || "Tidak diketahui",
-              icon: "🌴",
+              label: formatClassLabel(item.predicted_class),
             };
-
             const imageUrl =
               item.image_thumbnail_url || item.image_processed_url;
+            const itemSummary = item.summary || {};
+            const itemTotalTbs = itemSummary.total_detections ?? item.total_detections;
+            const itemLocation = item.location?.label || item.location?.auto_name || item.location_label;
 
             return (
-              <article
-                key={item.id}
-                className="history-card history-card-clickable"
-                role="button"
-                tabIndex={0}
-                aria-haspopup="dialog"
-                aria-label={`Lihat detail prediksi ${meta.label}`}
-                onClick={() => openPredictionDetail(item)}
-                onKeyDown={(event) => handleCardKeyDown(event, item)}
-              >
-                <div className="history-card-image">
-                  {imageUrl ? (
-                    <img src={imageUrl} alt={`Hasil ${meta.label}`} />
-                  ) : (
-                    <div className="history-no-image">
-                      <span>🌴</span>
-                      <small>Gambar tidak tersedia</small>
+              <article key={item.id} className="history-card">
+                <button
+                  type="button"
+                  className="history-card-open"
+                  aria-haspopup="dialog"
+                  aria-label={`Lihat detail prediksi ${meta.label}`}
+                  onClick={() => openPredictionDetail(item)}
+                >
+                  <div className="history-card-image">
+                    {imageUrl ? (
+                      <img src={imageUrl} alt={`Hasil ${meta.label}`} />
+                    ) : (
+                      <div className="history-no-image">
+                        <Icon name="gallery" size={28} />
+                        <small>Gambar tidak tersedia</small>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="history-card-body">
+                    <time dateTime={item.created_at}>{formatDate(item.created_at)}</time>
+                    <div className="history-card-heading">
+                      <MaturityBadge value={className} />
+                      <strong>{formatConfidence(item.confidence)}%</strong>
                     </div>
-                  )}
-
-                  <span className="history-card-badge">
-                    {meta.icon} {meta.label}
-                  </span>
-                </div>
-
-                <div className="history-card-body">
-                  <div className="history-card-heading">
-                    <div>
-                      <small>Tingkat kematangan</small>
-                      <h3>{meta.label}</h3>
+                    <div className="history-card-summary">
+                      <span><Icon name="scan" size={16} /> {itemTotalTbs ?? "—"} TBS</span>
+                      <span><Icon name={item.input_source === "camera" ? "camera" : "gallery"} size={16} /> {formatInputSource(item.input_source)}</span>
+                      {itemLocation && <span><Icon name="location" size={16} /> {itemLocation}</span>}
                     </div>
-
-                    <strong>{formatConfidence(item.confidence)}%</strong>
-                  </div>
-
-                  <div className="history-confidence-track">
-                    <span
-                      style={{
-                        width: `${Math.min(
-                          Math.max(
-                            Number(formatConfidence(item.confidence)),
-                            0,
-                          ),
-                          100,
-                        )}%`,
-                      }}
-                    />
-                  </div>
-
-                  <div className="history-card-meta">
-                    <span>📅 {formatDate(item.created_at)}</span>
-
-                    <span>
-                      {item.input_source === "camera"
-                        ? "📸 Kamera"
-                        : "🖼️ Galeri"}
-                    </span>
-                  </div>
-
-                  <div className="history-card-actions">
+                    {itemSummary.by_class && (
+                      <div className="history-card-breakdown" aria-label="Ringkasan kematangan TBS">
+                        {Object.entries(CLASS_META).map(([key, classMeta]) => (
+                          <span key={key} className={`is-${classMeta.tone}`}>
+                            {classMeta.label}
+                            <strong>{toSafeCount(itemSummary.by_class?.[key]?.total ?? itemSummary.by_class?.[key])}</strong>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     <span className="history-view-detail">
-                      Lihat detail <span aria-hidden="true">→</span>
+                      Lihat detail <Icon name="chevron" size={17} />
                     </span>
-
-                    <button
-                      type="button"
-                      className="history-delete-button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        handleDelete(item.id);
-                      }}
-                      onKeyDown={(event) => event.stopPropagation()}
-                      disabled={deletingId === item.id}
-                    >
-                      {deletingId === item.id ? "Menghapus..." : "🗑️ Hapus"}
-                    </button>
                   </div>
+                </button>
+                <div className="history-card-actions">
+                  <IconButton
+                    type="button"
+                    className="history-delete-button"
+                    onClick={() => setDeleteCandidate(item)}
+                    disabled={deletingId === item.id}
+                    aria-label={`Hapus riwayat ${formatDate(item.created_at)}`}
+                  >
+                    <Icon name="trash" size={18} />
+                  </IconButton>
                 </div>
               </article>
             );
@@ -826,112 +867,228 @@ function HistoryPage({ onStartPrediction }) {
         </section>
       )}
 
-      {selectedHistoryItem && (
-        <div
-          className="history-detail-backdrop"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closePredictionDetail();
-            }
-          }}
-        >
-          <section
-            className="history-detail-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="history-detail-title"
-          >
-            <header className="history-detail-header">
-              <div>
-                <span className="history-eyebrow">Detail riwayat</span>
-                <h2 id="history-detail-title">Hasil Prediksi</h2>
-              </div>
+      {!isLoading && historyItems.length > 0 && (
+        <nav className="history-pagination" aria-label="Pagination riwayat">
+          <p className="history-list-status" role="status">
+            {historyTotal !== null
+              ? `Menampilkan ${pageStart}–${pageEnd} dari ${historyTotal} riwayat.`
+              : `Menampilkan ${historyItems.length} riwayat pada halaman ${currentPage}.`}
+          </p>
 
-              <button
+          {hasActiveFilters && (
+            <p className="history-filter-scope">
+              {filteredItems.length} hasil cocok dari {historyItems.length} riwayat
+              pada halaman ini. Pencarian dan filter belum mencakup halaman lain.
+            </p>
+          )}
+
+          {(canGoToPreviousPage || canGoToNextPage) && (
+            <div className="history-pagination-controls">
+              <Button
                 type="button"
-                className="history-detail-close"
-                onClick={closePredictionDetail}
-                aria-label="Tutup detail riwayat"
+                variant="secondary"
+                className="history-pagination-direction history-pagination-previous"
+                onClick={() => changeHistoryPage(currentPage - 1)}
+                disabled={!canGoToPreviousPage || isPaginationBusy}
+                aria-label="Buka halaman riwayat sebelumnya"
               >
-                ×
-              </button>
-            </header>
+                <Icon name="chevron" size={18} />
+                <span>Sebelumnya</span>
+              </Button>
 
-            <div className="history-detail-content">
-              {isDetailLoading && (
-                <div className="history-detail-loading" role="status">
-                  <div className="history-spinner" />
-                  <h3>Memuat detail...</h3>
-                  <p>Data riwayat sedang diambil dari server.</p>
+              {totalPages !== null && (
+                <div className="history-pagination-pages" aria-label="Pilih halaman">
+                  {paginationItems.map((item) => (
+                    typeof item === "number" ? (
+                      <Button
+                        key={item}
+                        type="button"
+                        variant={item === currentPage ? "secondary" : "ghost"}
+                        className="history-pagination-page"
+                        onClick={() => changeHistoryPage(item)}
+                        disabled={isPaginationBusy}
+                        aria-label={`Buka halaman ${item}`}
+                        aria-current={item === currentPage ? "page" : undefined}
+                      >
+                        {item}
+                      </Button>
+                    ) : (
+                      <span
+                        key={item}
+                        className="history-pagination-ellipsis"
+                        aria-hidden="true"
+                      >
+                        …
+                      </span>
+                    )
+                  ))}
                 </div>
               )}
 
+              {totalPages !== null && (
+                <span className="history-pagination-mobile-status">
+                  {currentPage} / {totalPages}
+                </span>
+              )}
+
+              <Button
+                type="button"
+                variant="secondary"
+                className="history-pagination-direction"
+                onClick={() => changeHistoryPage(currentPage + 1)}
+                disabled={!canGoToNextPage || isPaginationBusy}
+                aria-label="Buka halaman riwayat berikutnya"
+              >
+                <span>Berikutnya</span>
+                <Icon name="chevron" size={18} />
+              </Button>
+            </div>
+          )}
+
+          {totalPages === 1 && (
+            <p className="history-list-end">Semua riwayat berada pada halaman ini.</p>
+          )}
+        </nav>
+      )}
+
+      <Modal
+        open={Boolean(selectedHistoryItem)}
+        onClose={closePredictionDetail}
+        eyebrow="Detail Riwayat"
+        title="Hasil Prediksi"
+        className="history-detail-modal"
+      >
+              {isDetailLoading && (
+                <LoadingState title="Memuat detail..." description="Data riwayat sedang diambil." />
+              )}
+
               {!isDetailLoading && detailError && (
-                <div className="history-detail-error" role="alert">
-                  <h3>Detail tidak dapat dibuka</h3>
-                  <p>{detailError}</p>
+                <Alert tone="error" role="alert" className="history-detail-error">
                   <div>
-                    <button type="button" onClick={retryPredictionDetail}>
+                    <strong>Detail tidak dapat dibuka</strong>
+                    <p>{detailError}</p>
+                    <div className="history-detail-error-actions">
+                      <Button type="button" onClick={retryPredictionDetail}>
                       Coba lagi
-                    </button>
-                    <button type="button" onClick={closePredictionDetail}>
+                      </Button>
+                      <Button type="button" variant="secondary" onClick={closePredictionDetail}>
                       Tutup
-                    </button>
+                      </Button>
+                    </div>
                   </div>
-                </div>
+                </Alert>
               )}
 
               {!isDetailLoading && !detailError && detailRecord && (
                 <>
-                  <figure className="history-detail-figure">
-                    {detailImageUrl ? (
-                      <img
-                        src={detailImageUrl}
-                        alt={`Gambar hasil ${detailClassMeta.label}`}
-                        onError={() =>
-                          setFailedDetailImages((current) => ({
-                            ...current,
-                            [detailImageUrl]: true,
-                          }))
-                        }
-                      />
-                    ) : (
-                      <div className="history-detail-no-image">
-                        <span>🌴</span>
-                        <p>Gambar hasil tidak tersedia.</p>
-                      </div>
-                    )}
-                  </figure>
+                  <div className="history-detail-primary">
+                    <figure className="history-detail-figure">
+                      {detailImageUrl ? (
+                        <img
+                          src={detailImageUrl}
+                          alt={`Gambar hasil ${detailClassMeta.label}`}
+                          onError={() =>
+                            setFailedDetailImages((current) => ({
+                              ...current,
+                              [detailImageUrl]: true,
+                            }))
+                          }
+                        />
+                      ) : (
+                        <div className="history-detail-no-image">
+                          <Icon name="gallery" size={30} />
+                          <p>Gambar hasil tidak tersedia.</p>
+                        </div>
+                      )}
+                    </figure>
 
-                  <section className="history-detail-overview">
-                    <div className="history-detail-class">
-                      <span>{detailClassMeta.icon}</span>
-                      <div>
-                        <small>Ringkasan Kematangan Gambar</small>
-                        <h3>{detailClassMeta.label}</h3>
-                      </div>
-                    </div>
-
-                    <div className="history-detail-confidence">
-                      <small>Keyakinan ringkasan</small>
-                      <strong>
-                        {formatConfidence(detailRecord.confidence)}%
-                      </strong>
-                    </div>
-                  </section>
-
-                  <div className="history-detail-probabilities">
-                    {Object.entries(CLASS_META).map(([className, meta]) => (
-                      <div key={className}>
-                        <span>{meta.label}</span>
-                        <strong>
-                          {formatConfidence(
-                            detailProbabilities[className],
+                    <div className="history-detail-result-stack">
+                      <section className="history-detail-overview">
+                        <div className="history-detail-section-heading">
+                          <small>Ringkasan Hasil</small>
+                        </div>
+                        <div className="history-detail-class">
+                          <div>
+                            <small>
+                              {dominantMaturityClass
+                                ? "Kematangan dominan"
+                                : hasBalancedComposition
+                                  ? "Distribusi kematangan"
+                                  : "Klasifikasi tersimpan"}
+                            </small>
+                            <h3>
+                              {dominantMaturityClass
+                                ? formatClassLabel(dominantMaturityClass)
+                                : hasBalancedComposition
+                                  ? "Komposisi seimbang"
+                                  : detailClassMeta.label}
+                            </h3>
+                          </div>
+                          {dominantMaturityClass && (
+                            <MaturityBadge value={dominantMaturityClass} />
                           )}
-                          %
-                        </strong>
-                      </div>
-                    ))}
+                        </div>
+
+                        {detailComposition.total > 0 && (
+                          <div className="history-detail-composition">
+                            <div className="history-detail-composition-heading">
+                              <strong>Komposisi TBS</strong>
+                              <span>{detailComposition.total} TBS</span>
+                            </div>
+                            <dl>
+                              {Object.entries(CLASS_META).map(([className, meta]) => (
+                                <div key={className}>
+                                  <dt>{meta.label}</dt>
+                                  <dd>{detailComposition.byClass[className]} TBS</dd>
+                                </div>
+                              ))}
+                            </dl>
+                          </div>
+                        )}
+
+                        {showDominantConfidence && (
+                          <div className="history-detail-confidence">
+                            <small>Rata-rata keyakinan TBS dominan</small>
+                            <strong>
+                              {formatConfidence(detailRecord.confidence)}%
+                            </strong>
+                          </div>
+                        )}
+
+                        {detailComposition.total === 0 && (
+                          <p className="history-detail-legacy-summary">
+                            Detail per TBS tidak tersedia. Label klasifikasi
+                            tersimpan ditampilkan tanpa klaim kelas dominan.
+                          </p>
+                        )}
+                      </section>
+
+                      <section className="history-detail-probabilities" aria-labelledby="history-probability-title">
+                        <div className="history-detail-section-heading">
+                          <small>Probabilitas Model</small>
+                          <h3 id="history-probability-title">
+                            {detailComposition.total > 0
+                              ? "Rata-rata probabilitas per TBS"
+                              : "Probabilitas klasifikasi tersimpan"}
+                          </h3>
+                        </div>
+                        <div className="history-detail-probability-list">
+                          {Object.entries(CLASS_META).map(([className, meta]) => (
+                            <ProbabilityBar
+                              key={className}
+                              label={meta.label}
+                              value={detailProbabilities[className]}
+                              className={`is-${meta.tone}`}
+                            />
+                          ))}
+                        </div>
+                        <p className="history-detail-probability-note">
+                          {detailComposition.total > 0
+                            ? "Nilai ini adalah rata-rata keluaran model untuk seluruh TBS, bukan persentase jumlah TBS."
+                            : "Detail per TBS tidak tersedia untuk menjelaskan agregasi nilai pada record ini."}
+                        </p>
+                      </section>
+                    </div>
                   </div>
 
                   <section className="history-detail-metadata">
@@ -964,106 +1121,17 @@ function HistoryPage({ onStartPrediction }) {
                     )}
                   </section>
 
-                  <section className="history-detail-location">
-                    <div className="history-detail-section-heading">
-                      <small>Metadata Lokasi</small>
-                      <h3>Lokasi Pengambilan</h3>
-                    </div>
-
-                    {hasDetailLocation ? (
-                      <>
-                        {(detailLocationLabel || detailLocationAutoName) && (
-                          <div className="history-detail-location-names">
-                            {detailLocationLabel && (
-                              <div>
-                                <small>Lokasi</small>
-                                <strong>{detailLocationLabel}</strong>
-                              </div>
-                            )}
-                            {detailLocationAutoName &&
-                              detailLocationAutoName !== detailLocationLabel && (
-                                <div>
-                                  <small>Perkiraan wilayah</small>
-                                  <strong>{detailLocationAutoName}</strong>
-                                </div>
-                              )}
-                          </div>
-                        )}
-
-                        <div className="history-detail-location-grid">
-                          <div>
-                            <small>Latitude</small>
-                            <strong>{detailLatitude.toFixed(6)}</strong>
-                          </div>
-                          <div>
-                            <small>Longitude</small>
-                            <strong>{detailLongitude.toFixed(6)}</strong>
-                          </div>
-                          <div>
-                            <small>Akurasi</small>
-                            <strong>
-                              {hasLocationAccuracy
-                                ? `±${locationAccuracy.toFixed(1)} m`
-                                : "Tidak tersedia"}
-                            </strong>
-                            {locationAccuracyQuality && (
-                              <span
-                                className={`history-detail-accuracy-quality is-${locationAccuracyQuality.level}`}
-                              >
-                                {locationAccuracyQuality.label}
-                              </span>
-                            )}
-                          </div>
-                          <div>
-                            <small>Waktu capture lokasi</small>
-                            <strong>
-                              {detailLocation.captured_at
-                                ? formatDate(detailLocation.captured_at)
-                                : "Tidak tersedia"}
-                            </strong>
-                          </div>
-                        </div>
-
-                        {locationAccuracyQuality?.level === "low" && (
-                          <p className="history-detail-location-precision-note">
-                            Posisi perangkat kurang presisi. Periksa titik pada
-                            peta.
-                          </p>
-                        )}
-
-                        <a
-                          className="history-detail-map-link"
-                          href={locationMapUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          Lihat di Peta
-                          <span aria-hidden="true">↗</span>
-                        </a>
-                      </>
-                    ) : detailLocationLabel || detailLocationAutoName ? (
-                      <div className="history-detail-location-names">
-                        {detailLocationLabel && (
-                          <div>
-                            <small>Lokasi</small>
-                            <strong>{detailLocationLabel}</strong>
-                          </div>
-                        )}
-                        {detailLocationAutoName &&
-                          detailLocationAutoName !== detailLocationLabel && (
-                            <div>
-                              <small>Perkiraan wilayah</small>
-                              <strong>{detailLocationAutoName}</strong>
-                            </div>
-                          )}
-                      </div>
-                    ) : (
-                      <p className="history-detail-location-empty">
-                        Lokasi tidak tersedia untuk hasil ini.
-                      </p>
+                  <LocationSummary
+                    location={detailLocation}
+                    className="history-detail-location"
+                    actions={!isEditingLocationLabel && (
+                      <Button type="button" variant="secondary" size="sm" onClick={startEditingLocationLabel}>
+                        <Icon name="edit" size={17} />
+                        Edit lokasi
+                      </Button>
                     )}
-
-                    {isEditingLocationLabel ? (
+                  >
+                    {isEditingLocationLabel && (
                       <form
                         className="history-detail-location-editor"
                         onSubmit={saveLocationLabel}
@@ -1091,74 +1159,31 @@ function HistoryPage({ onStartPrediction }) {
                           Kosongkan field untuk menghapus label manual.
                         </p>
                         {locationLabelError && (
-                          <p
-                            className="history-detail-location-edit-error"
-                            role="alert"
-                          >
-                            {locationLabelError}
-                          </p>
+                          <Alert tone="error" role="alert">{locationLabelError}</Alert>
                         )}
                         <div>
-                          <button
+                          <Button
                             type="submit"
                             disabled={isSavingLocationLabel}
                           >
                             {isSavingLocationLabel
                               ? "Menyimpan..."
                               : "Simpan"}
-                          </button>
-                          <button
+                          </Button>
+                          <Button
                             type="button"
+                            variant="secondary"
                             onClick={cancelEditingLocationLabel}
                             disabled={isSavingLocationLabel}
                           >
                             Batal
-                          </button>
+                          </Button>
                         </div>
                       </form>
-                    ) : (
-                      <button
-                        type="button"
-                        className="history-detail-location-edit-button"
-                        onClick={startEditingLocationLabel}
-                      >
-                        Edit Nama Lokasi
-                      </button>
                     )}
-                  </section>
+                  </LocationSummary>
 
-                  {hasPersistentDetectionData ? (
-                    <section className="history-detail-summary">
-                      <div className="history-detail-section-heading">
-                        <small>Ringkasan Deteksi</small>
-                        <h3>TBS pada Gambar</h3>
-                      </div>
-
-                      <div className="history-detail-total">
-                        <span>Total TBS terdeteksi</span>
-                        <strong>{detailSummary.total}</strong>
-                      </div>
-
-                      <div className="history-detail-count-grid">
-                        {Object.entries(CLASS_META).map(
-                          ([className, meta]) => (
-                            <div key={className}>
-                              <span>{meta.label}</span>
-                              <strong>
-                                {detailSummary.byClass[className]}
-                              </strong>
-                            </div>
-                          ),
-                        )}
-                      </div>
-
-                      {detailSummary.total === 0 && (
-                        <p className="history-detail-zero">
-                          Tidak ada TBS yang terdeteksi pada hasil ini.
-                        </p>
-                      )}
-                    </section>
-                  ) : (
+                  {!hasPersistentDetectionData && (
                     <section className="history-detail-unavailable">
                       <h3>Detail per TBS belum tersedia</h3>
                       <p>
@@ -1168,18 +1193,6 @@ function HistoryPage({ onStartPrediction }) {
                       </p>
                     </section>
                   )}
-
-                  {hasPersistentDetectionData &&
-                    detailSummary.total > 0 &&
-                    detailDetections.length === 0 && (
-                      <section className="history-detail-unavailable">
-                        <h3>Detail per TBS belum tersedia</h3>
-                        <p>
-                          Ringkasan jumlah TBS tersedia, tetapi rincian setiap
-                          objek belum tersimpan pada riwayat ini.
-                        </p>
-                      </section>
-                    )}
 
                   {detailDetections.length > 0 && (
                     <section className="history-detail-detections">
@@ -1205,7 +1218,7 @@ function HistoryPage({ onStartPrediction }) {
                             >
                               <div className="history-detail-detection-head">
                                 <h4>TBS {index + 1}</h4>
-                                <span>{formatClassLabel(className)}</span>
+                                <MaturityBadge value={className} />
                               </div>
 
                               <dl>
@@ -1229,29 +1242,25 @@ function HistoryPage({ onStartPrediction }) {
                                 </div>
                               </dl>
 
-                              {probabilities &&
-                                typeof probabilities === "object" && (
-                                  <div className="history-detail-detection-probs">
-                                    {Object.entries(CLASS_META).map(
-                                      ([key, meta]) => (
+                              {(probabilities || bbox) && (
+                                <details className="history-detail-detection-disclosure">
+                                  <summary>Lihat rincian TBS</summary>
+                                  {probabilities && typeof probabilities === "object" && (
+                                    <div className="history-detail-detection-probs">
+                                      {Object.entries(CLASS_META).map(([key, meta]) => (
                                         <div key={key}>
                                           <span>{meta.label}</span>
-                                          <strong>
-                                            {formatConfidence(
-                                              probabilities[key],
-                                            )}
-                                            %
-                                          </strong>
+                                          <strong>{formatConfidence(probabilities[key])}%</strong>
                                         </div>
-                                      ),
-                                    )}
-                                  </div>
-                                )}
-
-                              {bbox && (
-                                <details>
-                                  <summary>Koordinat bounding box</summary>
-                                  <code>[{bbox.join(", ")}]</code>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {bbox && (
+                                    <div className="history-detail-bbox">
+                                      <span>Koordinat bounding box</span>
+                                      <code>[{bbox.join(", ")}]</code>
+                                    </div>
+                                  )}
                                 </details>
                               )}
                             </article>
@@ -1292,10 +1301,42 @@ function HistoryPage({ onStartPrediction }) {
                   </p>
                 </>
               )}
-            </div>
-          </section>
+      </Modal>
+
+      <Modal
+        open={Boolean(deleteCandidate)}
+        onClose={() => {
+          if (!deletingId) setDeleteCandidate(null);
+        }}
+        title="Hapus riwayat?"
+        eyebrow="Konfirmasi"
+        role="alertdialog"
+        className="history-delete-modal"
+        closeOnBackdrop={!deletingId}
+      >
+        <p className="history-delete-copy">
+          Hasil prediksi {deleteCandidate ? formatDate(deleteCandidate.created_at) : "ini"} akan dihapus permanen dari riwayat.
+        </p>
+        <div className="history-delete-actions">
+          <Button
+            type="button"
+            variant="secondary"
+            data-autofocus
+            onClick={() => setDeleteCandidate(null)}
+            disabled={Boolean(deletingId)}
+          >
+            Batal
+          </Button>
+          <Button
+            type="button"
+            variant="danger"
+            onClick={() => handleDelete(deleteCandidate?.id)}
+            disabled={Boolean(deletingId)}
+          >
+            {deletingId ? "Menghapus..." : "Hapus riwayat"}
+          </Button>
         </div>
-      )}
+      </Modal>
     </main>
   );
 }

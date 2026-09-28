@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import AppHeader from "./components/AppHeader";
+import AppFooter from "./components/AppFooter";
 import BottomNav from "./components/BottomNav";
 
 import HomePage from "./pages/HomePage";
@@ -12,6 +13,8 @@ import HistoryPage from "./pages/HistoryPage";
 import ProfilePage from "./pages/ProfilePage";
 import AboutPage from "./pages/AboutPage";
 import AdminDashboardPage from "./pages/admin/AdminDashboardPage";
+import Icon from "./components/ui/Icon";
+import LoadingState from "./components/ui/LoadingState";
 
 import {
   clearAuthSession,
@@ -19,10 +22,13 @@ import {
   getStoredUser,
 } from "./services/api";
 
+import "./styles/tokens.css";
 import "./styles/global.css";
+import "./styles/ui.css";
 import "./styles/auth.css";
 import "./styles/home.css";
 import "./styles/navigation.css";
+import "./styles/footer.css";
 import "./styles/prediction.css";
 import "./styles/history.css";
 import "./styles/profile.css";
@@ -103,7 +109,7 @@ function App() {
 
           localStorage.setItem(ACTIVE_PAGE_KEY, "home");
         }
-      } catch (error) {
+      } catch {
         clearAuthSession();
 
         localStorage.removeItem(ACTIVE_PAGE_KEY);
@@ -215,6 +221,7 @@ function App() {
           currentUser={currentUser}
           onStartPrediction={() => handleNavigate("prediction")}
           onOpenHistory={() => handleNavigate("history")}
+          onOpenProfile={() => handleNavigate("profile")}
         />
       );
     }
@@ -263,6 +270,7 @@ function App() {
         currentUser={currentUser}
         onStartPrediction={() => handleNavigate("prediction")}
         onOpenHistory={() => handleNavigate("history")}
+        onOpenProfile={() => handleNavigate("profile")}
       />
     );
   };
@@ -273,14 +281,15 @@ function App() {
   if (isCheckingSession) {
     return (
       <main className="app-loading-page">
-        <div className="app-loading-card">
-          <div className="app-loading-logo">🌴</div>
-
-          <h1>SawitVision V3</h1>
-
-          <p>Memeriksa sesi pengguna...</p>
-
-          <div className="app-loading-spinner" />
+        <div className="app-loading-card" aria-labelledby="app-loading-title">
+          <div className="app-loading-mark" aria-hidden="true">
+            <Icon name="leaf" size={30} />
+          </div>
+          <h1 id="app-loading-title">SawitVision</h1>
+          <LoadingState
+            title="Memeriksa sesi pengguna..."
+            description="Menyiapkan ruang kerja Anda."
+          />
         </div>
       </main>
     );
@@ -341,6 +350,8 @@ function App() {
       <AppHeader currentUser={currentUser} onNavigate={handleNavigate} />
 
       {renderActivePage()}
+
+      {activePage !== "admin" && <AppFooter />}
 
       <BottomNav
         activePage={activePage}

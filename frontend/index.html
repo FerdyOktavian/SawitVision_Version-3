@@ -1,17 +1,33 @@
 <!doctype html>
-<html lang="id">
+<html lang="id" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem("sawitvision-theme");
+          document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+        } catch {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
+    <style>
+      html { background: #f6f4ec; }
+      html[data-theme="dark"] { background: #111713; }
+    </style>
 
     <link rel="icon" type="image/png" href="/favicon.png" />
 
     <meta
       name="description"
-      content="SawitVision AI — klasifikasi tingkat kematangan buah kelapa sawit menggunakan EfficientNetV2S."
+      content="SawitVision — teknologi pendukung analisis kematangan TBS sawit."
     />
 
-    <title>SawitVision AI</title>
+    <title>SawitVision</title>
   </head>
 
   <body>

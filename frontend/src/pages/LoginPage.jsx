@@ -1,179 +1,124 @@
 import { useState } from "react";
+import AuthLayout from "../components/auth/AuthLayout";
+import Alert from "../components/ui/Alert";
+import Button from "../components/ui/Button";
+import FormField from "../components/ui/FormField";
+import Icon from "../components/ui/Icon";
 import { loginUser, saveAuthSession } from "../services/api";
 import { formatPhoneInput, getPhoneError } from "../utils/phone";
 
-function LoginPage({
-  onLoginSuccess,
-  onGoToRegister,
-  onGoToForgotAccount,
-  recoveredAccount,
-}) {
+function LoginPage({ onLoginSuccess, onGoToRegister, onGoToForgotAccount, recoveredAccount }) {
   const [formData, setFormData] = useState(() => ({
     name: recoveredAccount?.name || "",
     phone_number: formatPhoneInput(recoveredAccount?.phone || ""),
   }));
-
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
 
-  
-
-  // =====================================================
-  // HANDLE INPUT
-  // =====================================================
   const handleChange = (event) => {
     const { name, value } = event.target;
-
     setErrorMessage("");
-
+    setFieldErrors((errors) => ({ ...errors, [name]: undefined }));
     setFormData((previousData) => ({
       ...previousData,
       [name]: name === "phone_number" ? formatPhoneInput(value) : value,
     }));
   };
 
-  // =====================================================
-  // LOGIN
-  // =====================================================
   const handleSubmit = async (event) => {
     event.preventDefault();
-
     const cleanedName = formData.name.trim();
     const phoneError = getPhoneError(formData.phone_number);
 
     if (cleanedName.length < 2) {
+      setFieldErrors({ name: "Nama minimal terdiri dari 2 karakter." });
       setErrorMessage("Nama minimal terdiri dari 2 karakter.");
       return;
     }
-
     if (phoneError) {
+      setFieldErrors({ phone_number: phoneError });
       setErrorMessage(phoneError);
       return;
     }
 
     setIsLoading(true);
     setErrorMessage("");
-
+    setFieldErrors({});
     try {
       const response = await loginUser({
         name: cleanedName,
         phone_number: formData.phone_number,
       });
-
       saveAuthSession(response.access_token, response.user);
-
       onLoginSuccess(response.user);
     } catch (error) {
-      setErrorMessage(
-        error.message || "Login gagal. Periksa kembali data kamu.",
-      );
+      setErrorMessage(error.message || "Login gagal. Periksa kembali data kamu.");
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <main className="auth-page">
-      <section className="auth-container">
-        <div className="auth-brand">
-          <div className="auth-logo">🌴</div>
+    <AuthLayout
+      title="Analisis TBS dalam satu ruang kerja"
+      description="Gunakan nama dan nomor telepon yang sudah terdaftar untuk melanjutkan pemeriksaan TBS."
+      cardEyebrow="Masuk"
+      cardTitle="Masuk ke akun"
+      cardDescription="Masukkan identitas akun SawitVision Anda."
+      footer={(
+        <>
+          <span>Belum punya akun?</span>
+          <Button type="button" variant="ghost" size="sm" onClick={onGoToRegister} disabled={isLoading}>
+            Daftar sekarang
+          </Button>
+        </>
+      )}
+    >
+      <form className="auth-form" onSubmit={handleSubmit} noValidate>
+        <FormField
+          id="login-name"
+          label="Nama lengkap"
+          error={fieldErrors.name}
+          type="text"
+          name="name"
+          value={formData.name}
+          onChange={handleChange}
+          placeholder="Contoh: Budi Santoso"
+          autoComplete="name"
+          disabled={isLoading}
+          required
+        />
+        <FormField
+          id="login-phone"
+          label="Nomor telepon"
+          hint="Gunakan nomor yang terdaftar, misalnya 081234567890."
+          error={fieldErrors.phone_number}
+          type="tel"
+          name="phone_number"
+          value={formData.phone_number}
+          onChange={handleChange}
+          placeholder="081234567890"
+          autoComplete="tel"
+          inputMode="tel"
+          disabled={isLoading}
+          required
+        />
 
-          <div>
-            <p className="auth-eyebrow">SawitVision V3</p>
-
-            <h1>Klasifikasi Kematangan Buah Sawit</h1>
-
-            <p className="auth-description">
-              Masuk menggunakan nama dan nomor telepon yang sudah terdaftar.
-            </p>
-          </div>
+        <div className="auth-form-assistance">
+          <Button type="button" variant="ghost" size="sm" onClick={onGoToForgotAccount} disabled={isLoading}>
+            Lupa akun?
+          </Button>
         </div>
 
-        <div className="auth-card">
-          <div className="auth-card-header">
-            <span className="auth-badge">Masuk</span>
+        {errorMessage && <Alert tone="error" role="alert">{errorMessage}</Alert>}
 
-            <h2>Selamat datang kembali</h2>
-
-            <p>Tidak perlu email dan password.</p>
-          </div>
-
-          <form className="auth-form" onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label htmlFor="login-name">Nama lengkap</label>
-
-              <input
-                id="login-name"
-                type="text"
-                name="name"
-                value={formData.name}
-                onChange={handleChange}
-                placeholder="Contoh: Budi Santoso"
-                autoComplete="name"
-                disabled={isLoading}
-              />
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="login-phone">Nomor telepon</label>
-
-              <input
-                id="login-phone"
-                type="tel"
-                name="phone_number"
-                value={formData.phone_number}
-                onChange={handleChange}
-                placeholder="Contoh: 081234567890"
-                autoComplete="tel"
-                inputMode="numeric"
-                disabled={isLoading}
-              />
-
-              <small>Bisa ditulis dengan format 08.</small>
-            </div>
-
-            {/* ============================================
-                TOMBOL LUPA AKUN
-            ============================================ */}
-            <div className="auth-forgot-account">
-              <button
-                type="button"
-                className="auth-link-button"
-                onClick={onGoToForgotAccount}
-                disabled={isLoading}
-              >
-                Lupa akun?
-              </button>
-            </div>
-
-            {errorMessage && (
-              <div className="auth-alert error">{errorMessage}</div>
-            )}
-
-            <button
-              type="submit"
-              className="auth-primary-button"
-              disabled={isLoading}
-            >
-              {isLoading ? "Sedang masuk..." : "Masuk ke SawitVision"}
-            </button>
-          </form>
-
-          <div className="auth-footer">
-            <span>Belum punya akun?</span>
-
-            <button
-              type="button"
-              className="auth-link-button"
-              onClick={onGoToRegister}
-              disabled={isLoading}
-            >
-              Daftar sekarang
-            </button>
-          </div>
-        </div>
-      </section>
-    </main>
+        <Button type="submit" block disabled={isLoading}>
+          <Icon name="login" size={19} />
+          {isLoading ? "Sedang masuk..." : "Masuk ke SawitVision"}
+        </Button>
+      </form>
+    </AuthLayout>
   );
 }
 
